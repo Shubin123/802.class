@@ -4,4 +4,6 @@ data/flow_500/
 data/packet_5000/
 train/checkpoints/*.pt
 train/__pycache__/*
-data/dataset_output/*
+data/output.parquet
+data/dataset_output/tmp_replay.npy
+data/dataset_output/dataset.parquet.zip

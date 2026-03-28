@@ -10,3 +10,8 @@ https://github.com/linwhitehat/ET-BERT/tree/main/datasets
 
 ![alt text](image.png)
 
+First generate the data with virtual interfaces:
+python data.py 
+
+Then:
+python databuilder.py --pcap-dir ./dataset_output/captures --out ./output.parquet
