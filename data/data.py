@@ -14,10 +14,8 @@ Each file encodes one traffic class. Two layouts are handled automatically:
       zeroed), padded / truncated to L bytes.
 
   Layout B — dict / structured  (from data_process/data_preprocess.py)
-      Keys include 'payload', 'len_train', 'time_train', etc.
+      Keys include 'payload', 'len_train', 'time_train', etc.cstnet
       'payload' value has shape (N, L).
-
-File discovery
 --------------
 The script looks for .npy files in three ways, in order:
 
@@ -38,6 +36,7 @@ Dependencies
 ------------
     pip install numpy pandas pyarrow pyshark
     apt install hostapd wpasupplicant tcpdump iw
+    pacman -S hostapd wpa_supplicant tcpdump iw
 """
 
 import os
@@ -57,6 +56,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 import pyshark
+import io
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -82,7 +82,7 @@ MON_IFACE = "wlan2"
 
 AP_SSID    = "dataset-ap"
 AP_PASS    = "datasetpass1234"
-AP_CHANNEL = 6
+AP_CHANNEL = 45
 AP_IP      = "192.168.77.1"
 STA_IP     = "192.168.77.2"
 
@@ -112,8 +112,18 @@ log = logging.getLogger(__name__)
 def _normalise(arr: np.ndarray) -> np.ndarray:
     """
     Return a (N, L) uint8 array regardless of input dtype / layout.
-    Handles: object arrays of variable-length lists, any integer dtype.
+    Handles: object arrays of variable-length lists, any integer dtype,
+    and hex-encoded string payloads.
     """
+    if arr.dtype.kind in {'U', 'S'}:  # handle hex strings
+        arr = np.asarray([s.replace(" ", "") for s in arr])
+        max_len = max(len(s) for s in arr) // 2
+        out = np.zeros((len(arr), max_len), dtype=np.uint8)
+        for i, s in enumerate(arr):
+            b = bytes.fromhex(s)
+            out[i, :len(b)] = np.frombuffer(b, dtype=np.uint8)
+        return out
+
     if arr.dtype == object:
         max_len = max(len(r) for r in arr)
         out = np.zeros((len(arr), max_len), dtype=np.uint8)
@@ -193,6 +203,21 @@ def discover_npy_files() -> Dict[str, Path]:
             np.save(str(p), data[labels == lbl])
             found[str(lbl)] = p
 
+    # 4. packet_5000 or flow_500 format
+    for p_dir in ["packet_5000", "flow_500"]:
+        d_path = SCRIPT_DIR / p_dir
+        datagram_f = d_path / "x_datagram_train.npy"
+        label_f = d_path / "y_train.npy"
+        if datagram_f.exists() and label_f.exists() and not found:
+            data = load_npy(datagram_f)
+            labels = np.load(str(label_f), allow_pickle=True)
+            tmp_dir = OUTPUT_DIR / "_splits"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            for lbl in np.unique(labels):
+                p = tmp_dir / f"{lbl}.npy"
+                np.save(str(p), data[labels == lbl])
+                found[str(lbl)] = p
+
     if not found:
         log.error(
             "No .npy files found. Expected one of:\n"
@@ -249,11 +274,19 @@ def wlan_interfaces() -> List[str]:
 _procs: List[subprocess.Popen] = []
 
 def _bg(cmd: List[str], name: str) -> None:
-    p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Removed DEVNULL so hostapd and wpa_supplicant natively output logs to terminal
+    import sys 
+    p = subprocess.Popen(cmd)
     _procs.append(p)
     log.info("Started %s (pid=%d)", name, p.pid)
 
 def start_network() -> None:
+    # If interfaces are missing from a dirty previous abort, nuke the module
+    ifaces = wlan_interfaces()
+    if any(need not in ifaces for need in (AP_IFACE, STA_IFACE, MON_IFACE)):
+        shell("rmmod mac80211_hwsim", check=False)
+        time.sleep(1)
+        
     # Load hwsim if needed
     if "mac80211_hwsim" not in subprocess.run(["lsmod"], capture_output=True, text=True).stdout:
         r = subprocess.run(["modprobe", "mac80211_hwsim", "radios=3"],
@@ -266,28 +299,53 @@ def start_network() -> None:
     ifaces = wlan_interfaces()
     for need in (AP_IFACE, STA_IFACE, MON_IFACE):
         if need not in ifaces:
-            log.error("Interface %s not found. Got: %s", need, ifaces)
+            log.error("Interface %s still not found after reload. Got: %s", need, ifaces)
             sys.exit(1)
+
+    if shutil.which("nmcli"):
+        for iface in (AP_IFACE, STA_IFACE, MON_IFACE):
+            shell(f"nmcli dev set {iface} managed no", check=False)
+
+    # Purge precisely the zombie processes from our script, rather than nuking the host's actual Wi-Fi
+    shell("pkill -9 -f wpasup.conf", check=False)
+    shell("pkill -9 -f hostapd.conf", check=False)
+    shell("rm -rf /var/run/wpa_supplicant/wlan1", check=False)
+    shell("rfkill unblock all", check=False)
 
     # AP
     Path(HOSTAPD_CONF).write_text(textwrap.dedent(f"""\
         interface={AP_IFACE}
         driver=nl80211
         ssid={AP_SSID}
-        hw_mode=g
+        hw_mode=a
         channel={AP_CHANNEL}
-        wpa=2
+        wpa=3
         wpa_passphrase={AP_PASS}
         wpa_key_mgmt=WPA-PSK
         rsn_pairwise=CCMP
     """))
-    shell(f"ip link set {AP_IFACE} up")
+    # Bring down first so hostapd can natively configure the radio channel without Device or Resource Busy
+    shell(f"ip link set {AP_IFACE} down", check=False)
     shell(f"ip addr flush dev {AP_IFACE}")
     shell(f"ip addr add {AP_IP}/24 dev {AP_IFACE}")
+    shell(f"ip link set {AP_IFACE} up")
     _bg(["hostapd", HOSTAPD_CONF], "hostapd")
     time.sleep(2)
 
-    # Station
+    # Station uses a transparent network namespace to prevent loopback routing shortcut
+    r = shell(f"iw dev {STA_IFACE} info", check=True)
+    phy_idx = None
+    for line in r.splitlines():
+        if "wiphy" in line:
+            phy_idx = line.split()[1]
+    if phy_idx is None:
+        raise RuntimeError(f"Could not find wiphy for {STA_IFACE}")
+            
+    shell("ip netns add ds_sta", check=False)
+    shell(f"iw phy phy{phy_idx} set netns name ds_sta")
+    shell(f"ip netns exec ds_sta ip link set lo up")
+    shell(f"ip netns exec ds_sta ip link set {STA_IFACE} up")
+    
     Path(WPASUP_CONF).write_text(textwrap.dedent(f"""\
         ctrl_interface=/var/run/wpa_supplicant
         network={{
@@ -296,18 +354,45 @@ def start_network() -> None:
             key_mgmt=WPA-PSK
         }}
     """))
-    _bg(["wpa_supplicant", "-B", "-Dnl80211", f"-i{STA_IFACE}", f"-c{WPASUP_CONF}"],
+    # DO NOT use -B (daemon mode) so python's Popen can track and kill the exact PID!
+    _bg(["ip", "netns", "exec", "ds_sta", "wpa_supplicant", "-Dnl80211", f"-i{STA_IFACE}", f"-c{WPASUP_CONF}"],
         "wpa_supplicant")
-    time.sleep(3)
-    shell(f"ip addr flush dev {STA_IFACE}")
-    shell(f"ip addr add {STA_IP}/24 dev {STA_IFACE}")
-    shell(f"ip route add {AP_IP}/32 dev {STA_IFACE}", check=False)
+        
+    for _ in range(15):
+        status = shell(f"ip netns exec ds_sta wpa_cli -p /var/run/wpa_supplicant -i {STA_IFACE} status", check=False)
+        if "wpa_state=COMPLETED" in status:
+            log.info("wpa_supplicant associated via CCMP")
+            break
+        time.sleep(1)
+    else:
+        log.warning("wpa_supplicant association timed out")
+
+    shell(f"ip netns exec ds_sta ip addr flush dev {STA_IFACE}")
+    shell(f"ip netns exec ds_sta ip addr add {STA_IP}/24 dev {STA_IFACE}")
+    shell(f"ip netns exec ds_sta ip route add default via {AP_IP} dev {STA_IFACE}", check=False)
+    
+    # Inject static ARP to bypass Linux kernel dropping ARP broadcasts for internal IPs
+    try:
+        ap_mac = Path(f"/sys/class/net/{AP_IFACE}/address").read_text().strip()
+        shell(f"ip netns exec ds_sta ip neigh add {AP_IP} lladdr {ap_mac} dev {STA_IFACE}", check=False)
+    except Exception as e:
+        log.debug("ARP injection skipped: %s", e)
 
     # Monitor
     shell(f"ip link set {MON_IFACE} down")
     shell(f"iw dev {MON_IFACE} set type monitor")
     shell(f"ip link set {MON_IFACE} up")
     shell(f"iw dev {MON_IFACE} set channel {AP_CHANNEL}")
+    
+    # ---------------------------------------------------------
+    # Kernel overrides to prevent firewall from silencing SYN
+    # ---------------------------------------------------------
+    shell(f"sysctl -w net.ipv4.conf.all.rp_filter=0", check=False)
+    shell(f"sysctl -w net.ipv4.conf.{AP_IFACE}.rp_filter=0", check=False)
+    shell(f"ip netns exec ds_sta sysctl -w net.ipv4.conf.all.rp_filter=0", check=False)
+    shell(f"iptables -I INPUT -i {AP_IFACE} -j ACCEPT", check=False)
+    shell(f"iptables -I OUTPUT -o {AP_IFACE} -j ACCEPT", check=False)
+    
     log.info("Network up  AP=%s  STA=%s  MON=%s", AP_IP, STA_IP, MON_IFACE)
 
 def stop_network() -> None:
@@ -316,10 +401,25 @@ def stop_network() -> None:
             p.terminate(); p.wait(timeout=5)
         except Exception:
             p.kill()
-    for iface in (AP_IFACE, STA_IFACE):
-        shell(f"ip addr flush dev {iface}", check=False)
+    shell(f"ip addr flush dev {AP_IFACE}", check=False)
+    
+    try:
+        r = shell(f"ip netns exec ds_sta iw dev {STA_IFACE} info", check=False)
+        for line in r.splitlines():
+            if "wiphy" in line:
+                phy_idx = line.split()[1]
+                shell(f"ip netns exec ds_sta iw phy phy{phy_idx} set netns 1", check=False)
+                break
+    except Exception:
+        pass
+                
+    shell(f"ip netns delete ds_sta", check=False)
     shell(f"ip link set {MON_IFACE} down", check=False)
     shell(f"iw dev {MON_IFACE} set type managed", check=False)
+    
+    if shutil.which("nmcli"):
+        for iface in (AP_IFACE, STA_IFACE, MON_IFACE):
+            shell(f"nmcli dev set {iface} managed yes", check=False)
     log.info("Network torn down")
 
 # ---------------------------------------------------------------------------
@@ -339,12 +439,18 @@ def _drain(conn: socket.socket) -> None:
 def echo_server(stop: threading.Event) -> None:
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    
+    # Check if the IP exists (NetworkManager sometimes drops it after hostapd starts)
+    r = subprocess.run(["ip", "addr", "show", "dev", AP_IFACE], capture_output=True, text=True)
+    if AP_IP not in r.stdout:
+        subprocess.run(["ip", "addr", "add", f"{AP_IP}/24", "dev", AP_IFACE], check=False)
+        
     srv.bind((AP_IP, REPLAY_PORT))
     srv.listen(128)
     srv.settimeout(1.0)
     while not stop.is_set():
         try:
-            conn, _ = srv.accept()
+            conn, _ = srv.accept()p
             threading.Thread(target=_drain, args=(conn,), daemon=True).start()
         except socket.timeout:
             pass
@@ -362,20 +468,36 @@ def replay(packets: np.ndarray) -> None:
     flow sizes rather than one giant stream.
     """
     n = len(packets)
-    for start in range(0, n, BATCH_SIZE):
-        batch = packets[start : start + BATCH_SIZE]
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            s.bind((STA_IP, 0))
-            s.settimeout(5.0)
-            s.connect((AP_IP, REPLAY_PORT))
-            for row in batch:
-                s.sendall(row.tobytes())
-                time.sleep(REPLAY_DELAY)
-            s.close()
-        except Exception as exc:
-            log.debug("Batch replay error: %s", exc)
+    # Serialize to disk so the namespace python process can read it effortlessly
+    tmp_npy = OUTPUT_DIR / "tmp_replay.npy"
+    np.save(str(tmp_npy), packets)
+    script = f"""
+import sys, socket, time
+import numpy as np
+try:
+    packets = np.load('{tmp_npy}')
+    for start in range(0, {n}, {BATCH_SIZE}):
+        batch = packets[start:start+{BATCH_SIZE}]
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        s.settimeout(5.0)
+        s.connect(('{AP_IP}', {REPLAY_PORT}))
+        for row in batch:
+            s.sendall(row.tobytes())
+            time.sleep({REPLAY_DELAY})
+        s.close()
+except Exception as e:
+    print(f"Batch replay error: {{e}}", file=sys.stderr)
+"""
+    tmp_py = OUTPUT_DIR / "tmp_replay.py"
+    tmp_py.write_text(script)
+    
+    r = subprocess.run(
+        ["ip", "netns", "exec", "ds_sta", sys.executable, str(tmp_py)],
+        capture_output=True, text=True
+    )
+    if r.stderr.strip():
+        log.error("Replay process log: %s", r.stderr.strip())
 
 # ---------------------------------------------------------------------------
 # Capture
@@ -416,42 +538,75 @@ def capture_label(label: str, packets: np.ndarray) -> Path:
 
 def extract_features(pcap: Path, label: str) -> pd.DataFrame:
     log.info("Extracting features from %s", pcap.name)
+    
+    # We use tshark with -T fields for much faster/reliable extraction than pyshark in Python 3.14
+    fields = [
+        "frame.time_epoch", "frame.len", "wlan.fc.type", "wlan.fc.subtype", 
+        "wlan.fc.retry", "wlan.fc.protected", "wlan.seq", "wlan.qos.tid", 
+        "wlan.duration", "radiotap.dbm_antsignal", "radiotap.datarate", "radiotap.mcs.index"
+    ]
+    
+    cmd = [
+        "tshark", "-r", str(pcap),
+        "-Y", "wlan.fc.type == 2",
+        "-T", "fields",
+        "-E", "separator=,",
+        "-E", "header=y",
+        "-E", "occurrence=f"
+    ]
+    for f in fields:
+        cmd.extend(["-e", f])
+        
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    except subprocess.CalledProcessError as e:
+        log.error("TShark failed on %s: %s", pcap.name, e.stderr)
+        return pd.DataFrame()
+        
+    df = pd.read_csv(io.StringIO(r.stdout))
+    
+    # Optional fields default to 0 or appropriate missing values
+    df.fillna({
+        "wlan.fc.retry": 0,
+        "wlan.fc.protected": 0,
+        "wlan.seq": 0,
+        "wlan.qos.tid": 0,
+        "wlan.duration": 0,
+        "radiotap.dbm_antsignal": -30,
+        "radiotap.datarate": 0,
+        "radiotap.mcs.index": 0
+    }, inplace=True)
+    
     records = []
-    cap = pyshark.FileCapture(
-        str(pcap),
-        display_filter="wlan.fc.type == 2",
-        use_json=True,
-    )
     prev_ts = None
-    for pkt in cap:
+    for _, row in df.iterrows():
         try:
-            ts  = float(pkt.sniff_timestamp)
+            ts  = float(row["frame.time_epoch"])
             iat = (ts - prev_ts) if prev_ts is not None else 0.0
             prev_ts = ts
-            w  = pkt.wlan
-            rt = getattr(pkt, "radiotap", None)
+            
             records.append({
                 "label"        : label,
                 "timestamp"    : ts,
                 "iat"          : float(iat),
-                "frame_len"    : int(pkt.length),
-                "fc_type"      : int(w.fc_type),
-                "fc_subtype"   : int(w.fc_subtype),
-                "fc_retry"     : int(getattr(w, "fc_retry", 0)),
-                "fc_protected" : int(getattr(w, "fc_protected", 0)),
-                "seq_num"      : int(getattr(w, "seq", 0)),
-                "qos_tid"      : int(getattr(w, "qos_tid", 0)),
-                "duration"     : int(getattr(w, "duration", 0)),
-                "signal_dbm"   : float(getattr(rt, "dbm_antsignal", -30)),
-                "data_rate"    : float(getattr(rt, "datarate", 0)),
-                "mcs_index"    : int(getattr(rt, "mcs_index", 0)),
+                "frame_len"    : int(row["frame.len"]),
+                "fc_type"      : int(row["wlan.fc.type"]),
+                "fc_subtype"   : int(row["wlan.fc.subtype"]),
+                "fc_retry"     : int(row["wlan.fc.retry"]),
+                "fc_protected" : int(row["wlan.fc.protected"]),
+                "seq_num"      : int(row["wlan.seq"]),
+                "qos_tid"      : int(row["wlan.qos.tid"]),
+                "duration"     : int(row["wlan.duration"]),
+                "signal_dbm"   : float(row["radiotap.dbm_antsignal"]),
+                "data_rate"    : float(row["radiotap.datarate"]),
+                "mcs_index"    : int(row["radiotap.mcs.index"]),
             })
         except Exception:
             continue
-    cap.close()
-    df = pd.DataFrame(records)
-    log.info("  %d frames extracted", len(df))
-    return df
+            
+    res_df = pd.DataFrame(records)
+    log.info("  %d frames extracted", len(res_df))
+    return res_df
 
 # ---------------------------------------------------------------------------
 # Augmentation
@@ -541,7 +696,6 @@ def main() -> None:
     ).round(2)
     summary.to_csv(OUTPUT_DIR / "summary.csv")
     log.info("Summary written to %s/summary.csv", OUTPUT_DIR)
-
 
 if __name__ == "__main__":
     main()

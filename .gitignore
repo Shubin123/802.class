@@ -1,0 +1,7 @@
+data/dataset_output/_splits/*.npy
+data/dataset_output/captures/*.pcap
+data/flow_500/
+data/packet_5000/
+train/checkpoints/*.pt
+train/__pycache__/*
+data/dataset_output/*
