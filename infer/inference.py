@@ -25,8 +25,18 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+
+
+import importlib.util
+import sys
+spec = importlib.util.spec_from_file_location("train", "../train/train.py")
+train = importlib.util.module_from_spec(spec)
+sys.modules["train"] = train
+spec.loader.exec_module(train)
+TrafficResNet = train.TrafficResNet
+
 try:
-    from scapy.all import rdpcap, RadioTap, Dot11, conf
+    from scapy.all import PcapReader, PcapNgReader, RadioTap, Dot11, conf
     conf.verb = 0  # silence scapy
 except ImportError:
     print("ERROR: scapy is required.  pip install scapy")
@@ -51,42 +61,45 @@ TRAINING_ZIP     = SCRIPT_DIR / ".." / "data" / "dataset_output" / "dataset.parq
 
 # ── Model (identical to train.py) ─────────────────────────────────────────────
 
-class ResBlock1D(nn.Module):
-    def __init__(self, ch):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv1d(ch, ch, 3, padding=1, bias=False), nn.GroupNorm(4, ch), nn.ReLU(),
-            nn.Conv1d(ch, ch, 3, padding=1, bias=False), nn.GroupNorm(4, ch),
-        )
-        self.relu = nn.ReLU()
-    def forward(self, x):
-        return self.relu(x + self.net(x))
+# class ResBlock1D(nn.Module):
+#     def __init__(self, ch):
+#         super().__init__()
+#         self.net = nn.Sequential(
+#             nn.Conv1d(ch, ch, 3, padding=1, bias=False), nn.GroupNorm(4, ch), nn.ReLU(),
+#             nn.Conv1d(ch, ch, 3, padding=1, bias=False), nn.GroupNorm(4, ch),
+#         )
+#         self.relu = nn.ReLU()
+#     def forward(self, x):
+#         return self.relu(x + self.net(x))
 
-class TrafficResNet(nn.Module):
-    def __init__(self, num_classes, in_channels):
-        super().__init__()
-        self.stem = nn.Sequential(
-            nn.Conv1d(in_channels, 64, 7, padding=3, bias=False),
-            nn.GroupNorm(4, 64), nn.ReLU(), nn.MaxPool1d(2),
-        )
-        self.layer1 = ResBlock1D(64)
-        self.layer2 = nn.Sequential(
-            nn.Conv1d(64, 128, 3, stride=2, padding=1, bias=False),
-            nn.GroupNorm(8, 128), nn.ReLU(), ResBlock1D(128),
-        )
-        self.layer3 = nn.Sequential(
-            nn.Conv1d(128, 256, 3, stride=2, padding=1, bias=False),
-            nn.GroupNorm(8, 256), nn.ReLU(), ResBlock1D(256),
-        )
-        self.pool = nn.AdaptiveAvgPool1d(1)
-        self.fc   = nn.Linear(256, num_classes)
+# class TrafficResNet(nn.Module):
+#     def __init__(self, num_classes, in_channels):
+#         super().__init__()
+#         self.stem = nn.Sequential(
+#             nn.Conv1d(in_channels, 64, 7, padding=3, bias=False),
+#             nn.GroupNorm(4, 64), nn.ReLU(), nn.MaxPool1d(2),
+#         )
+#         self.layer1 = ResBlock1D(64)
+#         self.layer2 = nn.Sequential(
+#             nn.Conv1d(64, 128, 3, stride=2, padding=1, bias=False),
+#             nn.GroupNorm(8, 128), nn.ReLU(), ResBlock1D(128),
+#         )
+#         self.layer3 = nn.Sequential(
+#             nn.Conv1d(128, 256, 3, stride=2, padding=1, bias=False),
+#             nn.GroupNorm(8, 256), nn.ReLU(), ResBlock1D(256),
+#         )
+#         self.pool = nn.AdaptiveAvgPool1d(1)
+#         self.fc   = nn.Linear(256, num_classes)
 
-    def forward(self, x):
-        x = self.stem(x)
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        return self.fc(self.pool(x).flatten(1))
+#     def forward(self, x):
+#         x = self.stem(x)
+#         x = self.layer1(x)
+#         x = self.layer2(x)
+#         x = self.layer3(x)
+#         return self.fc(self.pool(x).flatten(1))
+
+
+
 
 # ── Normalization stats ───────────────────────────────────────────────────────
 
@@ -122,16 +135,25 @@ def load_norm_stats():
 
 # ── Pcap helpers (scapy – handles .pcap and .pcapng) ──────────────────────────
 
+def _open_pcap(pcap_path):
+    """Open a .pcap or .pcapng file as a streaming reader (no bulk load)."""
+    path = str(pcap_path)
+    try:
+        return PcapNgReader(path)
+    except Exception:
+        return PcapReader(path)
+
 def find_captures(directory=None):
     d = Path(directory) if directory else SCRIPT_DIR
     return sorted(d.glob("*.pcap")) + sorted(d.glob("*.pcapng"))
 
 def scan_macs(pcap_path):
-    """Return {mac: data-frame count} from a monitor-mode capture."""
-    print(f"[scan] Reading {pcap_path.name} …")
-    pkts = rdpcap(str(pcap_path))
+    """Return {mac: data-frame count} from a monitor-mode capture (streaming)."""
+    print(f"[scan] Streaming {pcap_path.name} …")
     mac_counts = Counter()
-    for pkt in pkts:
+    total = 0
+    for pkt in _open_pcap(pcap_path):
+        total += 1
         if not pkt.haslayer(Dot11):
             continue
         d = pkt[Dot11]
@@ -140,17 +162,19 @@ def scan_macs(pcap_path):
         for a in (d.addr1, d.addr2, d.addr3):
             if a and a.lower() != 'ff:ff:ff:ff:ff:ff':
                 mac_counts[a.lower()] += 1
-    print(f"[scan] {len(pkts):,} packets total, {len(mac_counts)} unique MACs in data frames")
+        if total % 100_000 == 0:
+            print(f"  … {total:,} packets scanned", end='\r')
+    print(f"[scan] {total:,} packets scanned, {len(mac_counts)} unique MACs in data frames")
     return dict(mac_counts)
 
 def extract_features(pcap_path, target_mac):
-    """Extract the 9 training features for frames involving *target_mac*."""
-    pkts    = rdpcap(str(pcap_path))
+    """Extract the 9 training features for frames involving *target_mac* (streaming)."""
+    print(f"[feat] Streaming {pcap_path.name} for MAC {target_mac} …")
     target  = target_mac.lower()
     records = []
     prev_ts = None
 
-    for pkt in pkts:
+    for pkt in _open_pcap(pcap_path):
         if not pkt.haslayer(Dot11):
             continue
         d = pkt[Dot11]
@@ -208,7 +232,7 @@ def extract_features(pcap_path, target_mac):
 
 def load_model(ckpt=None):
     if ckpt is None:
-        for name in ("best_resnet40.pt", "best_resnet.pt.600epoch", "best_resnet.pt.300epoch"):
+        for name in ("best_resnet.pt.600epoch", "best_resnet40.pt", "best_resnet.pt.300epoch"):
             p = CHECKPOINT_DIR / name
             if p.exists():
                 ckpt = p; break
