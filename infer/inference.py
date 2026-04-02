@@ -69,25 +69,63 @@ def find_captures(directory=None):
     d = Path(directory) if directory else SCRIPT_DIR
     return sorted(d.glob("*.pcap")) + sorted(d.glob("*.pcapng"))
 
-# ── MAC scanner ──────────────────────────────────────────────────────────────
+# ── MAC scanner (fast raw mode) ──────────────────────────────────────────────
 
 def scan_macs(pcap_path):
-    """Scan for transmitter MACs in data frames (type_subtype=0x20)."""
-    print(f"[scan] Streaming {pcap_path.name} (filter: 0x20) …")
+    """
+    Scan for transmitter MACs in data frames (type_subtype=0x20).
+    Uses raw pcap reading to avoid scapy's slow deep dissection.
+    """
+    from scapy.all import RawPcapReader, RawPcapNgReader
+    import struct
+
+    print(f"[scan] Scanning {pcap_path.name} (filter: 0x20) …")
     mac_counts = Counter()
     total = matched = 0
-    for pkt in _open_pcap(pcap_path):
+
+    # Open raw reader (no dissection)
+    path = str(pcap_path)
+    try:
+        reader = RawPcapNgReader(path)
+    except Exception:
+        reader = RawPcapReader(path)
+
+    for raw_pkt, _metadata in reader:
         total += 1
-        if not pkt.haslayer(Dot11):
-            continue
-        d = pkt[Dot11]
-        if d.type != 2 or d.subtype != 0:
-            continue
-        matched += 1
-        if d.addr2 and d.addr2.lower() != 'ff:ff:ff:ff:ff:ff':
-            mac_counts[d.addr2.lower()] += 1
         if total % 100_000 == 0:
             print(f"  … {total:,} scanned", end='\r')
+
+        data = bytes(raw_pkt)
+        if len(data) < 8:
+            continue
+
+        # Parse RadioTap header: first 4 bytes = version(1) + pad(1) + length(2)
+        rt_len = struct.unpack_from('<H', data, 2)[0]
+        dot11_start = rt_len
+
+        if len(data) < dot11_start + 24:
+            continue
+
+        # Dot11 Frame Control: 2 bytes at dot11_start
+        fc = struct.unpack_from('<H', data, dot11_start)[0]
+        frame_type    = (fc >> 2) & 0x3
+        frame_subtype = (fc >> 4) & 0xf
+
+        if frame_type != 2 or frame_subtype != 0:
+            continue
+        matched += 1
+
+        # addr2 (transmitter) is at offset 10 from Dot11 start, 6 bytes
+        addr2_offset = dot11_start + 10
+        if len(data) < addr2_offset + 6:
+            continue
+        addr2_bytes = data[addr2_offset:addr2_offset + 6]
+        addr2 = ':'.join(f'{b:02x}' for b in addr2_bytes)
+
+        if addr2 != 'ff:ff:ff:ff:ff:ff':
+            mac_counts[addr2] += 1
+
+    reader.close()
     print(f"[scan] {total:,} total, {matched:,} data(0x20), {len(mac_counts)} transmitter MACs")
     return dict(mac_counts)
 
@@ -152,17 +190,109 @@ METADATA_COLS = [
 
 def extract_metadata(pcap_path, target_mac, debug=False):
     """
-    Extract 9 metadata features per frame (matching training pipeline).
+    Extract 9 metadata features per frame using tshark (fast, matches training).
 
     signal_dbm and mcs_index are set to their training mean values
     (augmented values in training are random noise — not class-specific).
     After z-score normalization they become ~0, making the model classify
     on the 7 real features that match training perfectly.
     """
-    print(f"[feat] Extracting metadata features for {target_mac} …")
     target = target_mac.lower()
+    print(f"[feat] Extracting metadata features for {target} …")
+
+    # ── Try tshark first (C-speed, same tool as training pipeline) ────────
+    try:
+        arr = _extract_metadata_tshark(pcap_path, target, debug)
+        if arr is not None:
+            return arr
+    except Exception as e:
+        print(f"[feat] tshark unavailable ({e}), falling back to scapy …")
+
+    # ── Fallback: scapy (slow but always works) ──────────────────────────
+    return _extract_metadata_scapy(pcap_path, target, debug)
+
+
+def _extract_metadata_tshark(pcap_path, target, debug=False):
+    """Fast extraction using tshark — same tool as training pipeline."""
+    import subprocess, io
+    import pandas as pd
+
+    # Combined filter: type_subtype=0x20 AND target MAC in any address field
+    mac_filter = (f"wlan.fc.type_subtype == 0x0020 && wlan.addr == {target}")
+
+    fields = [
+        "frame.time_epoch", "frame.len", "wlan.seq",
+        "wlan.duration", "radiotap.datarate",
+    ]
+
+    cmd = [
+        "tshark", "-r", str(pcap_path),
+        "-Y", mac_filter,
+        "-T", "fields",
+        "-E", "separator=,",
+        "-E", "header=y",
+        "-E", "occurrence=f",
+    ]
+    for f in fields:
+        cmd.extend(["-e", f])
+
+    print(f"[feat] Running tshark (filter: 0x20 + MAC) …")
+    r = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=300)
+
+    df = pd.read_csv(io.StringIO(r.stdout))
+    if df.empty:
+        return np.zeros((0, len(METADATA_COLS)), dtype=np.float32)
+
+    df.fillna({
+        "wlan.seq": 0, "wlan.duration": 0, "radiotap.datarate": 0,
+    }, inplace=True)
+
     records = []
     prev_ts = None
+    for _, row in df.iterrows():
+        ts = float(row["frame.time_epoch"])
+        iat = (ts - prev_ts) if prev_ts is not None else 0.0
+        prev_ts = ts
+        frame_len = int(row["frame.len"])
+
+        records.append([
+            iat,
+            frame_len,
+            int(row["wlan.seq"]),
+            int(row["wlan.duration"]),
+            RSSI_MEAN,                            # signal_dbm = training mean
+            float(row["radiotap.datarate"]),
+            5.0,                                   # mcs_index = training mean
+            np.log1p(iat),
+            frame_len / 1024.0,
+        ])
+
+    n_feats = len(METADATA_COLS)
+    n_frames = len(records)
+    print(f"[feat] {n_frames:,} frames → {n_feats} metadata features (tshark)")
+    if not records:
+        return np.zeros((0, n_feats), dtype=np.float32)
+
+    arr = np.array(records, dtype=np.float32)
+    print(f"[feat] signal_dbm={RSSI_MEAN}, mcs_index=5 (training means → neutral after z-score)")
+
+    if debug:
+        print(f"\n[debug] Feature statistics (raw, before normalization):")
+        print(f"  {'Feature':>15} {'mean':>12} {'std':>12} {'min':>12} {'max':>12}")
+        print(f"  {'-'*63}")
+        for i, name in enumerate(METADATA_COLS):
+            col = arr[:, i]
+            print(f"  {name:>15} {col.mean():>12.4f} {col.std():>12.4f} {col.min():>12.4f} {col.max():>12.4f}")
+
+    return arr
+
+
+def _extract_metadata_scapy(pcap_path, target, debug=False):
+    """Fallback: scapy-based extraction (slow but always works)."""
+    print(f"[feat] Using scapy fallback (slower) …")
+    records = []
+    prev_ts = None
+    count = 0
 
     for pkt in _open_pcap(pcap_path):
         if not pkt.haslayer(Dot11):
@@ -181,7 +311,6 @@ def extract_metadata(pcap_path, target_mac, debug=False):
         seq_num    = (d.SC >> 4) if d.SC else 0
         duration   = d.ID if d.ID else 0
 
-        # data_rate: scapy and tshark give identical values (verified)
         data_rate = 0.0
         if pkt.haslayer(RadioTap):
             rt = pkt[RadioTap]
@@ -191,29 +320,20 @@ def extract_metadata(pcap_path, target_mac, debug=False):
             except (AttributeError, TypeError):
                 pass
 
-        # signal_dbm → training mean (-65.0), mcs_index → training mean (5)
-        # These are augmented noise in training, not class-discriminative.
         records.append([iat, frame_len, seq_num, duration,
                         RSSI_MEAN, data_rate, 5.0,
                         np.log1p(iat), frame_len / 1024.0])
+        count += 1
+        if count % 5000 == 0:
+            print(f"  … {count:,} frames", end='\r')
 
     n_feats = len(METADATA_COLS)
-    n_frames = len(records)
-    print(f"[feat] {n_frames:,} frames → {n_feats} metadata features")
+    print(f"[feat] {len(records):,} frames → {n_feats} metadata features (scapy)")
     if not records:
         return np.zeros((0, n_feats), dtype=np.float32)
 
     arr = np.array(records, dtype=np.float32)
     print(f"[feat] signal_dbm={RSSI_MEAN}, mcs_index=5 (training means → neutral after z-score)")
-
-    if debug:
-        print(f"\n[debug] Feature statistics (raw, before normalization):")
-        print(f"  {'Feature':>15} {'mean':>12} {'std':>12} {'min':>12} {'max':>12}")
-        print(f"  {'-'*63}")
-        for i, name in enumerate(METADATA_COLS):
-            col = arr[:, i]
-            print(f"  {name:>15} {col.mean():>12.4f} {col.std():>12.4f} {col.min():>12.4f} {col.max():>12.4f}")
-
     return arr
 
 # ── Normalization stats ───────────────────────────────────────────────────────
