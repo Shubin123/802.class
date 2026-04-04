@@ -1,10 +1,10 @@
-data/dataset_output/_splits/*.npy
-data/dataset_output/captures/*.pcap
+data/dataset_output_old/_splits/*.npy
+data/dataset_output_old/captures/*.pcap
 data/flow_500/
 data/packet_5000/
 train/checkpoints/*.pt
 train/__pycache__/*
 data/output.parquet
-data/dataset_output/tmp_replay.npy
+data/dataset_output_old/tmp_replay.npy
 data/dataset_output/dataset.parquet.zip
 infer/c157.pcapng
