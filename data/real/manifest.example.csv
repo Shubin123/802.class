@@ -1,7 +1,7 @@
 pcap,mac,label,session
-sessions/serviceA__s01.pcap,aa:bb:cc:dd:ee:ff,0,s01
-sessions/serviceB__s01.pcap,aa:bb:cc:dd:ee:ff,1,s01
-sessions/serviceC__s01.pcap,aa:bb:cc:dd:ee:ff,2,s01
-sessions/serviceD__s01.pcap,aa:bb:cc:dd:ee:ff,3,s01
-sessions/serviceA__s02.pcap,aa:bb:cc:dd:ee:ff,0,s02
-sessions/serviceB__s02.pcap,aa:bb:cc:dd:ee:ff,1,s02
+sessions/serviceA__s01.pcapng,aa:bb:cc:dd:ee:ff,0,s01
+sessions/serviceB__s01.pcapng,aa:bb:cc:dd:ee:ff,1,s01
+sessions/serviceC__s01.pcapng,aa:bb:cc:dd:ee:ff,2,s01
+sessions/serviceD__s01.pcapng,aa:bb:cc:dd:ee:ff,3,s01
+sessions/serviceA__s02.pcapng,aa:bb:cc:dd:ee:ff,0,s02
+sessions/serviceB__s02.pcapng,aa:bb:cc:dd:ee:ff,1,s02

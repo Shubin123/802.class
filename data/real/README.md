@@ -12,39 +12,143 @@ on encrypted (CCMP) traffic.
 
 ---
 
-## 1. Hardware / setup
+## 1. Roles & hardware
 
-- A WiFi adapter that supports **monitor mode** (e.g. Atheros AR9271,
-  MediaTek MT7612U, or any mac80211 NIC that allows `type monitor`).
-- A separate **device under test (DUT)** — phone/laptop — joined to your AP. Note
-  its **client MAC** (this is the `mac` column in the manifest).
-- Capture host on **the same channel** as the AP.
+Two machines:
 
-Put the capture adapter into monitor mode, locked to the AP's channel `N`:
+- **Sniffer = this MacBook.** Its built-in Wi-Fi (`en0`) goes into monitor mode
+  while the Mac stays online over **Ethernet**. macOS monitor capture is reliable
+  and emits radiotap — more so than a DWA-171 / RTL8812AU on Linux.
+- **DUT (device under test) = a SEPARATE Wi-Fi device** (phone, or the Linux box
+  as a plain client) joined to your AP. We classify *its* frames; note its
+  **Wi-Fi MAC** → the `mac` column. The Mac cannot be both sniffer and DUT on one
+  radio (monitor mode can't browse).
+
+> ⚠️ **Ethernet must be the active default route BEFORE you enable monitor mode**,
+> or the Mac drops offline (monitor mode disassociates Wi-Fi). On this machine,
+> as last checked, `en0` (Wi-Fi) was the default route and the Ethernet adapters
+> were inactive — fix that first:
+>
+> ```bash
+> route -n get default | grep interface   # must NOT print en0
+> ifconfig en3; ifconfig en4              # your Ethernet adapter: 'status: active' + an inet
+> ```
+
+## 2a. Collect on macOS (recommended)
+
+`airport sniff` was removed in macOS 14.4+; we use Wireshark's `dumpcap`, which
+sets monitor mode **and** channel on the built-in card. Express the AP's channel
+as a frequency (ch157 = 5785 MHz; the repo's `c157.pcapng` suggests ch157).
+
+For each service, with the DUT in a **fresh browser profile (extensions off,
+background chatter minimized)**, load *only that service* for a fixed window:
 
 ```bash
-sudo ip link set wlan1 down
-sudo iw dev wlan1 set type monitor
-sudo ip link set wlan1 up
-sudo iw dev wlan1 set channel N        # N = your AP's channel (e.g. 36)
+sudo ./capture_mac.sh 117 s01 5785 60               # CSTNET id 117, session s01, ch157, 60s
+# 80 MHz wide AP: sudo ./capture_mac.sh 117 s01 5785,VHT80,5775 60
 ```
 
-(Or use `airmon-ng start wlan1`, which creates `wlan1mon`.)
+Output → `sessions/117__s01.pcapng`. The script refuses to run if Wi-Fi is still
+your default route, so it won't strand you offline.
 
-## 2. Collect — one service per timed window
+**Channel width matters.** If your AP runs 80/160 MHz and you capture at 20 MHz,
+you'll catch management/control frames but **miss most high-rate data frames** —
+exactly the ones we classify. The `<type>` token (`VHT80`, `VHT160`, `HT40+`…) is
+Wireshark-version-specific, so for wide channels the **GUI is the most reliable**:
+open **Wireshark** → *Capture Options* → select `en0` → tick **Monitor Mode** →
+set the 802.11 channel **and width** → record.
 
-For each service, with the DUT in a **fresh browser profile, extensions off, and
-background chatter minimized**, load *only that service* for a fixed window:
+## 2c. Sanity-check before collecting the full set
+
+Do one short test capture and confirm you actually got **data frames from the DUT
+MAC** (not just beacons). This catches wrong-channel / wrong-width / wrong-MAC
+before you waste a collection run:
 
 ```bash
-sudo ./capture.sh wlan1mon 36 132 s01 60   # CSTNET id 132 (youtube), session s01, 60s
+TS=/Applications/Wireshark.app/Contents/MacOS/tshark
+# total data frames (type 2) in the capture:
+$TS -r sessions/117__s01.pcapng -Y 'wlan.fc.type==2' 2>/dev/null | wc -l
+# data frames involving your DUT's Wi-Fi MAC:
+$TS -r sessions/117__s01.pcapng -Y 'wlan.fc.type==2 && wlan.addr==<DUT_WIFI_MAC>' 2>/dev/null | wc -l
 ```
 
-Repeat for several services and 2+ sessions each (sessions let the harness report
-a per-session majority vote and, later, a session-disjoint split). Start with
-**CDN-distinct** services (e.g. youtube / netflix / wikipedia / github) — many of
-the 120 labels share CDNs (`cloudfront`, `azureedge`, `alicdn`, `amazonaws`,
-`ggpht`, `twimg`…) and will be inherently confusable.
+You want at least a few hundred data frames for the DUT MAC over a 60 s window.
+A handful (or zero) means wrong channel/width/MAC — fix before continuing. The
+harness needs ≥128 frames per capture to form even one window.
+
+## 2b. Collect on Linux (alternative — the DWA-171 path)
+
+```bash
+sudo ip link set wlan1 down; sudo iw dev wlan1 set type monitor
+sudo ip link set wlan1 up;   sudo iw dev wlan1 set channel 157
+sudo ./capture.sh wlan1mon 157 117 s01 60
+```
+
+(The DWA-171 / RTL8812AU needs the morrownr/aircrack `8812au` driver and is often
+flaky in monitor mode — which is why the Mac path above is preferred.)
+
+Then, regardless of OS: repeat for several services and **2+ sessions each**
+(sessions enable a per-session majority vote and, later, a session-disjoint
+split). Start with **CDN-distinct** services — many of the 120 labels share CDNs
+(`cloudfront`, `azureedge`, `alicdn`, `amazonaws`, `ggpht`, `twimg`…) and are
+inherently confusable.
+
+## 2d. Automated, clock-synced collection (use this for training data)
+
+A capture is only usable as training data if every frame maps to one known service.
+`collect.py` guarantees that: it starts the capture **and** commands the DUT to load
+exactly one service for a fixed window, so the file↔service mapping is correct by
+construction. With `--transport agent` the two devices keep a synced clock, and each
+traffic window is recorded **in the sniffer's clock** (the pcap clock) in the manifest.
+
+No SSH, no keys — control is a **plain TCP socket on the LAN**. Two DUT options:
+
+| where it runs | file | role |
+|---|---|---|
+| both | `sync.py` | control protocol (length-prefixed JSON) + NTP-style clock-offset estimation |
+| **DUT** (synced) | `dut_agent.py` | recommended: takes `generate` commands, **reports exact start/stop** so windows are millisecond-accurate (`--transport agent`) |
+| **DUT** (simplest) | `dut_listen.sh` | zero-Python: a `netcat` listener that runs the pushed command (`--transport nc`). No clock sync — orchestrator brackets the window |
+| sniffer | `collect.py` | one-command orchestrator: capture + drive DUT + manifest |
+| DUT (opt) | `dut_browse.py` | headless-browser traffic (`--traffic playwright`); needs `pip install playwright && playwright install chromium` |
+
+### Topology (both devices have Wi-Fi + Ethernet on one network)
+- **Control = Ethernet.** Point `--dut-host` at the DUT's **Ethernet IP** so control
+  traffic never enters the Wi-Fi capture.
+- **Traffic = Wi-Fi.** Same-subnet means the OS may send "browse" traffic out Ethernet;
+  the `curl` driver forces Wi-Fi with `curl --interface <wlan>`. On a **Linux DUT run
+  `dut_agent.py` as root** so curl hard-binds the device (`SO_BINDTODEVICE`). The
+  post-capture data-frame count is your proof egress actually went over Wi-Fi.
+
+### Step 1 — on the DUT (pick one; both are keyless)
+```bash
+# A) synced, recommended:
+python3 dut_agent.py --port 9999 --wifi-iface wlan0     # Linux: prefix with sudo;  macOS: --wifi-iface en0
+
+# B) zero-Python netcat (lab LAN only — it runs pushed commands via sh):
+./dut_listen.sh 9999                                    # GNU-traditional nc: NC_PFLAG=1 ./dut_listen.sh 9999
+```
+
+### Step 2 — one command on the sniffer
+```bash
+# Rehearse the sync + RPC + timing with NO capture (safe; works even over loopback):
+python collect.py --services services.example.csv --transport agent \
+    --dut-host <DUT_ETH_IP> --no-capture --sessions 1 --duration 3
+
+# Real run (Ethernet must be the Mac's default route — collect.py refuses otherwise):
+sudo python collect.py --services services.csv --transport agent \
+    --dut-host <DUT_ETH_IP> --dut-wifi-mac aa:bb:cc:dd:ee:ff --dut-wifi-iface wlan0 \
+    --freq 5785 --sessions 3 --duration 60 --eval
+```
+
+`--eval` runs `eval_real.py` on the fresh manifest. Use **≥2 sessions**: distinct
+sessions are what enable a leakage-free **session-disjoint** split later. (The current
+synthetic model scores 93% on its own data but ~entirely via window-adjacency leakage —
+permutation importance: scrambling the zero-information `seq_num` counter drops it to 1%.
+A session-disjoint split removes that.)
+
+For the **netcat** path, just swap `--transport agent` → `--transport nc` (same
+`--dut-host`/`--dut-port`); `--transport local` is single-host testing. The manifest
+gains `t_start,t_end` columns (sniffer clock); `eval_real.py` ignores them.
 
 ## 3. Label mapping (important — get this right or the gap number is meaningless)
 
