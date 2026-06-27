@@ -13,3 +13,6 @@ infer/c157.pcapng
 data/real/sessions/
 data/real/manifest.csv
 data/real/report.json
+data/real/*.pcapng
+data/real/*.pcap
+data/real/__pycache__/
