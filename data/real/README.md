@@ -1,60 +1,63 @@
-# Real-data capture — Windows DUT + Mac sniffer
+# Real-data capture — Mac sniffer drives a Windows DUT over ncat
 
 Goal: measure whether the model trained on synthetic (hwsim-replayed) data works on
-**real** Wi-Fi traffic. Expectation: ~chance — which is the justification to retrain on
-real data. This directory is the smallest path to that measured number.
+**real** Wi-Fi traffic (expectation: ~chance → justifies retraining on real data).
 
-## Roles (no monitor mode on the DUT)
-- **DUT = Windows machine.** A *normal* Wi-Fi client with internet. It just browses the
-  services; it never enters monitor mode. It has Wi-Fi **and** Ethernet, so traffic is
-  forced out Wi-Fi (`curl --interface <wifi-ip>`).
-- **Sniffer = the Mac.** `en0` in monitor mode on the AP's channel, capturing the DUT's
-  frames over the air. Stays online via Ethernet so monitor mode doesn't drop it.
+## How it works (real two-machine comms, no SSH, nothing pasted by hand)
+`collect_ncat.py` runs **on the Mac**. Over **ncat** it talks to an ncat listener on the
+**Windows DUT** and, per (service, session):
 
-No SSH/relay/agent: the DUT runs **autonomously** and logs timestamps; the Mac captures
-continuously and slices by those timestamps. Clocks just need to be NTP-synced.
+```
+start dumpcap on en0  ->  ncat-send a curl.exe-over-Wi-Fi loop to the DUT for the window
+->  stop dumpcap  ->  count the DUT's data frames  ->  manifest row
+```
 
-## Flow
+Capture + trigger are one process on the Mac, so they share the Mac's pcap clock — that
+**is** the sync — and `manifest.csv` is built here automatically.
 
-### 1. DUT (Windows) — get Wi-Fi info
+- **DUT = Windows**, normal Wi-Fi client (never monitor mode). Has Wi-Fi + Ethernet, so
+  curl is bound to the Wi-Fi IP (`--interface`) and **control (ncat) uses the Ethernet IP**
+  so it stays out of the capture.
+- **Sniffer = the Mac**, `en0` monitor mode on the DUT's AP channel, online via Ethernet.
+
+## Run
+
+### DUT (Windows) — start the ncat listener
 ```
 git pull
-python data\real\dut.py --info
+data\real\ncat.exe -k -l 9999 --sh-exec "powershell -NoProfile -Command -"
 ```
-Paste the `IFACE / WIFI_IP / WIFI_MAC / CHANNEL / FREQ` lines to the Mac side.
+Leave it running. Make sure `wlan` is connected to the AP. Note the **Ethernet IPv4**
+(`ipconfig` → Ethernet adapter) — that's `--dut-host`.
 
-### 2. Mac — start capturing (needs Wireshark's ChmodBPF so dumpcap runs without sudo)
+### Mac — collect (you run this; `sudo` for dumpcap)
 ```
-dumpcap -i en0 -I -k <FREQ> -w capture.pcapng        # leave running for the whole DUT run
+git pull
+# 1) validate comms first — detects the DUT Wi-Fi and drives traffic, no capture:
+python3 data/real/collect_ncat.py --dut-host <DUT_ETH_IP> --dut-port 9999 --no-capture --sessions 1 --duration 5
+# 2) the real run:
+sudo python3 data/real/collect_ncat.py --dut-host <DUT_ETH_IP> --dut-port 9999 --sessions 2 --duration 60
 ```
-(Ethernet must be the Mac's default route first, or monitor mode drops it offline.)
+Auto-detects the DUT's Wi-Fi iface / IP / MAC / channel over ncat, captures + drives each
+service, writes `sessions/*.pcapng` + `manifest.csv`. (Pass `--wifi-mac/--freq/--wifi-ip`
+to override if detection is partial.)
 
-### 3. DUT (Windows) — run the schedule
-```
-python data\real\dut.py            # cycles services.csv over Wi-Fi, writes dut_run.csv
-```
-Send the printed schedule (or `dut_run.csv`) back.
-
-### 4. Mac — slice + evaluate
-```
-python data/real/slice.py --pcap capture.pcapng --schedule dut_run.csv --mac <WIFI_MAC> --eval
-```
-This cuts per-service pcaps into `sessions/`, writes `manifest.csv`, and runs
-`eval_real.py` for the real top-1 / macro-F1 vs the `1/N` chance baseline.
+### Evaluate
+`infer/eval_real.py` reads `manifest.csv` and reports real top-1 / macro-F1 vs the `1/N`
+chance baseline (needs torch/scapy — run it wherever those are installed, or hand the
+`sessions/` + `manifest.csv` off for eval).
 
 ## Files
 | file | runs on | role |
 |---|---|---|
-| `dut.py` | Windows DUT | autonomous traffic generator + Wi-Fi info |
-| `services.csv` | — | `label,name,url` to browse (labels are CSTNET class ids) |
-| `slice.py` | Mac | slice the capture by `dut_run.csv` + MAC → `manifest.csv` → eval |
-| `../../infer/eval_real.py` | Mac | windowed prediction vs chance baseline |
+| `collect_ncat.py` | Mac | drives the DUT over ncat + captures + manifest |
+| `ncat.exe` | Windows DUT | the listener binary (committed so no install) |
+| `services.csv` | — | `label,name,url` (labels are CSTNET class ids) |
+| `../../infer/eval_real.py` | — | windowed prediction vs chance baseline |
 
 ## Notes
-- **Labels** in `services.csv` must be the real CSTNET class ids for the gap number to be
-  meaningful; the current values are provisional. (Model output index ≠ CSTNET id — the
-  training remap is lexicographic; `eval_real.py` handles it.)
-- If a sliced file shows **0–few data frames**: wrong channel, wrong MAC, or the DUT's
-  traffic egressed Ethernet instead of Wi-Fi (check `--wifi-ip`).
-- Many of the 120 classes share CDNs (cloudfront/azureedge/alicdn/…) — a size/timing
-  fingerprint has a real collision ceiling regardless.
+- **Labels** in `services.csv` must be the real CSTNET class ids for the gap number to
+  mean anything (provisional now). Model index ≠ CSTNET id; `eval_real.py` handles the remap.
+- A capture with **0–few data frames** → wrong channel/MAC, or curl egressed Ethernet
+  instead of Wi-Fi (pass `--wifi-ip <addr>`).
+- Many of the 120 classes share CDNs → a size/timing fingerprint has a collision ceiling.
