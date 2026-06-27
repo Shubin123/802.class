@@ -20,6 +20,7 @@ ip — out of band; curl is bound to the Wi-Fi ip so the captured traffic egress
 import argparse
 import csv
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -32,47 +33,61 @@ def log(m):
     print(f"[{time.strftime('%H:%M:%S')}] {m}", flush=True)
 
 
-def send(host, port, script, timeout=180):
-    """One ncat connection: pipe `script` to the DUT (ncat half-closes on EOF -> the DUT's
-    PowerShell runs it), return its stdout."""
+MARK = "zzZNCDONEZzz"
+
+
+def send(host, port, command, timeout=120):
+    """Talk to the DUT's interactive ncat→PowerShell the way an interactive ncat session
+    does: send one (single-line) command, then a `Write-Output <MARK>`, read until the
+    MARK comes back (so the command has finished), then `exit` to close. No half-close —
+    an interactive PowerShell would treat that as EOF and abort a running command."""
     try:
-        r = subprocess.run(["ncat", "-w", "15", str(host), str(port)],
-                           input=script.encode(), capture_output=True, timeout=timeout)
-        return r.stdout.decode(errors="replace")
-    except subprocess.TimeoutExpired:
-        return ""
-
-
-# PowerShell run on the DUT to report its Wi-Fi adapter; emits KEY=VALUE lines.
-WIFI_PS = r"""
-$raw = netsh wlan show interfaces
-function val($k){ ($raw | Select-String ("^\s*"+$k+"\s*:") | Select-Object -First 1) -replace ("^\s*"+$k+"\s*:\s*"),"" }
-$name = (val 'Name').Trim()
-$mac  = (val 'Physical address').Trim()
-if (-not $mac -and $name) { $mac = (Get-NetAdapter -Name $name -EA SilentlyContinue).MacAddress }
-$ch   = (val 'Channel').Trim()
-$ssid = (val 'SSID').Trim()
-$ip = $null
-if ($name) { $ip = (Get-NetIPAddress -InterfaceAlias $name -AddressFamily IPv4 -EA SilentlyContinue).IPAddress }
-Write-Output "IFACE=$name"; Write-Output "MAC=$mac"; Write-Output "CH=$ch"
-Write-Output "SSID=$ssid"; Write-Output "IP=$ip"
-""".strip()
+        s = socket.create_connection((host, int(port)), timeout=15)
+    except OSError as e:
+        return f"__CONNERR__ {e}"
+    out = b""
+    try:
+        s.sendall((command + f"\nWrite-Output '{MARK}'\n").encode())
+        s.settimeout(timeout)
+        while MARK.encode() not in out:
+            try:
+                d = s.recv(8192)
+            except socket.timeout:
+                break
+            if not d:
+                break
+            out += d
+        try:
+            s.sendall(b"exit\n")
+        except OSError:
+            pass
+    finally:
+        s.close()
+    return out.decode(errors="replace").split(MARK)[0]
 
 
 def detect_wifi(host, port):
-    out = send(host, port, WIFI_PS, timeout=40)
+    raw = send(host, port, "netsh wlan show interfaces", timeout=40)
     def g(k):
-        m = re.search(rf"^{k}=(.*)$", out, re.MULTILINE)
-        return m.group(1).strip() if m and m.group(1).strip() else None
-    mac = g("MAC")
+        m = re.search(rf"^\s*{k}\s*:\s*(.+?)\s*$", raw, re.MULTILINE | re.IGNORECASE)
+        return m.group(1).strip() if m else None
+    iface, mac, ssid = g("Name"), g("Physical address"), g("SSID")
     if mac:
         mac = mac.lower().replace("-", ":")
-    ch = g("CH")
+    chs = g("Channel")
+    ch = re.search(r"\d+", chs).group(0) if chs else None
     freq = None
-    if ch and ch.isdigit():
+    if ch:
         c = int(ch)
         freq = 2484 if c == 14 else (2407 + 5 * c if c <= 14 else 5000 + 5 * c)
-    return {"iface": g("IFACE"), "ip": g("IP"), "mac": mac, "channel": ch, "freq": freq, "raw": out}
+    ip = None
+    if iface:
+        ipraw = send(host, port,
+                     f"(Get-NetIPAddress -InterfaceAlias '{iface}' -AddressFamily IPv4 -EA SilentlyContinue).IPAddress",
+                     timeout=20)
+        m = re.search(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b", ipraw)
+        ip = m.group(1) if m else None
+    return {"iface": iface, "ip": ip, "mac": mac, "channel": ch, "freq": freq, "ssid": ssid, "raw": raw}
 
 
 def drive(host, port, url, wifi_ip, duration):
