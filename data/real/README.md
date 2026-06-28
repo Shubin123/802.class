@@ -20,27 +20,30 @@ Capture + trigger are one process on the Mac, so they share the Mac's pcap clock
   so it stays out of the capture.
 - **Sniffer = the Mac**, `en0` monitor mode on the DUT's AP channel, online via Ethernet.
 
-## Run
+## Run — two scripts
 
-### DUT (Windows) — start the ncat listener
+### Script 1 — DUT (Windows): `dut_listen.bat`
 ```
 git pull
-data\real\ncat.exe -k -l 9999 --sh-exec "powershell -NoProfile -Command -"
+data\real\dut_listen.bat
 ```
-Leave it running. Make sure `wlan` is connected to the AP. Note the **Ethernet IPv4**
-(`ipconfig` → Ethernet adapter) — that's `--dut-host`.
+Starts the ncat listener and prints this PC's IPs. Leave the window open. Make sure
+`wlan` is connected to the AP, and allow port 9999 in the firewall (it tells you how).
+Use one of the printed IPs as `--dut-host` on the Mac.
 
-### Mac — collect (you run this; `sudo` for dumpcap)
+### Script 2 — Mac: `collect_ncat.py`
 ```
 git pull
-# 1) validate comms first — detects the DUT Wi-Fi and drives traffic, no capture:
-python3 data/real/collect_ncat.py --dut-host <DUT_ETH_IP> --dut-port 9999 --no-capture --sessions 1 --duration 5
-# 2) the real run:
-sudo python3 data/real/collect_ncat.py --dut-host <DUT_ETH_IP> --dut-port 9999 --sessions 2 --duration 60
+# 1) test comms only — detects the DUT Wi-Fi + drives traffic, no capture, no sudo:
+python3 data/real/collect_ncat.py --dut-host 10.0.0.61 --no-capture
+
+# 2) the real run — capture + drive each service (sudo for dumpcap):
+sudo python3 data/real/collect_ncat.py --dut-host 10.0.0.61 --sessions 2 --duration 60
 ```
-Auto-detects the DUT's Wi-Fi iface / IP / MAC / channel over ncat, captures + drives each
-service, writes `sessions/*.pcapng` + `manifest.csv`. (Pass `--wifi-mac/--freq/--wifi-ip`
-to override if detection is partial.)
+`--dut-host` is the only required flag (port defaults to 9999). It auto-detects the DUT's
+Wi-Fi iface / IP / MAC / channel over ncat, captures + drives each service, and writes
+`sessions/*.pcapng` + `manifest.csv`. (`python3 collect_ncat.py --help` shows these
+examples; pass `--wifi-mac/--freq/--wifi-ip` to override if detection is partial.)
 
 ### Evaluate
 `infer/eval_real.py` reads `manifest.csv` and reports real top-1 / macro-F1 vs the `1/N`
@@ -50,7 +53,8 @@ chance baseline (needs torch/scapy — run it wherever those are installed, or h
 ## Files
 | file | runs on | role |
 |---|---|---|
-| `collect_ncat.py` | Mac | drives the DUT over ncat + captures + manifest |
+| `dut_listen.bat` | Windows DUT | **script 1** — starts the ncat listener |
+| `collect_ncat.py` | Mac | **script 2** — drives the DUT + captures + manifest |
 | `ncat.exe` | Windows DUT | the listener binary (committed so no install) |
 | `services.csv` | — | `label,name,url` (labels are CSTNET class ids) |
 | `../../infer/eval_real.py` | — | windowed prediction vs chance baseline |
