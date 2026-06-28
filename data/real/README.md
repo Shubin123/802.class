@@ -38,12 +38,17 @@ git pull
 python3 data/real/collect_ncat.py --dut-host 10.0.0.61 --no-capture
 
 # 2) the real run — capture + drive each service (sudo for dumpcap):
-sudo python3 data/real/collect_ncat.py --dut-host 10.0.0.61 --sessions 2 --duration 60
+sudo python3 data/real/collect_ncat.py --dut-host 10.0.0.61 --iface en0 --no-monitor --sessions 2 --duration 60
 ```
 `--dut-host` is the only required flag (port defaults to 9999). It auto-detects the DUT's
-Wi-Fi iface / IP / MAC / channel over ncat, captures + drives each service, and writes
-`sessions/*.pcapng` + `manifest.csv`. (`python3 collect_ncat.py --help` shows these
-examples; pass `--wifi-mac/--freq/--wifi-ip` to override if detection is partial.)
+Wi-Fi iface / IP / MAC / channel over a **single persistent ncat stream**, captures + drives
+each service, and writes `sessions/*.pcapng` + `manifest.csv`.
+
+**macOS monitor mode:** `dumpcap` can't set the 802.11 channel on macOS (`-k` errors), so
+put the capture interface into **monitor mode on the AP's channel yourself** (the run prints
+the channel — here ch44/5220), then pass `--no-monitor` so the collector just captures on it
+as-is. If a capture shows few/0 frames, the interface is on the wrong channel or the MAC
+filter is off (override with `--wifi-mac`).
 
 ### Evaluate
 `infer/eval_real.py` reads `manifest.csv` and reports real top-1 / macro-F1 vs the `1/N`
