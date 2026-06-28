@@ -132,8 +132,16 @@ def count_frames(args, out, mac):
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--dut-host", required=True, help="DUT ETHERNET ip (control, out-of-band)")
+    ap = argparse.ArgumentParser(
+        description="Drive the Windows DUT (ncat listener) and capture on the Mac.",
+        epilog="examples:\n"
+               "  # 1) test comms only (no capture, no sudo):\n"
+               "  python3 collect_ncat.py --dut-host 10.0.0.61 --no-capture\n"
+               "  # 2) real run (sudo for dumpcap; Ethernet must be the Mac default route):\n"
+               "  sudo python3 collect_ncat.py --dut-host 10.0.0.61 --sessions 2 --duration 60\n"
+               "\n(start the listener on the DUT first: run data\\real\\dut_listen.bat)",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--dut-host", required=True, help="DUT ip the Mac can reach (control)")
     ap.add_argument("--dut-port", type=int, default=9999)
     ap.add_argument("--services", default=str(HERE / "services.csv"))
     ap.add_argument("--out-dir", default=str(HERE / "sessions"))
