@@ -36,38 +36,48 @@ def log(m):
 MARK = "zzZNCDONEZzz"
 
 
-def send(host, port, command, timeout=120):
-    """Talk to the DUT's interactive ncat→PowerShell the way an interactive ncat session
-    does: send one (single-line) command, then a `Write-Output <MARK>`, read until the
-    MARK comes back (so the command has finished), then `exit` to close. No half-close —
-    an interactive PowerShell would treat that as EOF and abort a running command."""
-    try:
-        s = socket.create_connection((host, int(port)), timeout=15)
-    except OSError as e:
-        return f"__CONNERR__ {e}"
-    out = b""
-    try:
-        s.sendall((command + f"\nWrite-Output '{MARK}'\n").encode())
-        s.settimeout(timeout)
-        while MARK.encode() not in out:
+class DUT:
+    """ONE persistent ncat control stream to the DUT's interactive PowerShell — reused for
+    every command, so there's a single connection / single PowerShell on the DUT (not one
+    per command, which piled up and wedged the listener). run() sends a single-line command
+    + a marker, reads until the marker returns, and leaves the socket open for the next."""
+
+    def __init__(self, host, port, timeout=15):
+        self.s = socket.create_connection((host, int(port)), timeout=timeout)
+        self.leftover = b""
+
+    def run(self, command, timeout=120):
+        mk = MARK.encode()
+        self.s.sendall((command + f"\nWrite-Output '{MARK}'\n").encode())
+        self.s.settimeout(timeout)
+        out = self.leftover
+        self.leftover = b""
+        while mk not in out:
             try:
-                d = s.recv(8192)
+                d = self.s.recv(8192)
             except socket.timeout:
                 break
             if not d:
                 break
             out += d
+        if mk in out:
+            before, self.leftover = out.split(mk, 1)
+            return before.decode(errors="replace")
+        return out.decode(errors="replace")
+
+    def close(self):
         try:
-            s.sendall(b"exit\n")
+            self.s.sendall(b"exit\n")
         except OSError:
             pass
-    finally:
-        s.close()
-    return out.decode(errors="replace").split(MARK)[0]
+        try:
+            self.s.close()
+        except OSError:
+            pass
 
 
-def detect_wifi(host, port):
-    raw = send(host, port, "netsh wlan show interfaces", timeout=40)
+def detect_wifi(dut):
+    raw = dut.run("netsh wlan show interfaces", timeout=40)
     def g(k):
         m = re.search(rf"^\s*{k}\s*:\s*(.+?)\s*$", raw, re.MULTILINE | re.IGNORECASE)
         return m.group(1).strip() if m else None
@@ -82,28 +92,31 @@ def detect_wifi(host, port):
         freq = 2484 if c == 14 else (2407 + 5 * c if c <= 14 else 5000 + 5 * c)
     ip = None
     if iface:
-        ipraw = send(host, port,
-                     f"(Get-NetIPAddress -InterfaceAlias '{iface}' -AddressFamily IPv4 -EA SilentlyContinue).IPAddress",
-                     timeout=20)
+        ipraw = dut.run(f"(Get-NetIPAddress -InterfaceAlias '{iface}' -AddressFamily IPv4 -EA SilentlyContinue).IPAddress", timeout=20)
         m = re.search(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b", ipraw)
         ip = m.group(1) if m else None
     return {"iface": iface, "ip": ip, "mac": mac, "channel": ch, "freq": freq, "ssid": ssid, "raw": raw}
 
 
-def drive(host, port, url, wifi_ip, duration):
+def drive(dut, url, wifi_ip, duration):
     iface = f"--interface {wifi_ip} " if wifi_ip else ""
     ps = (f"$e=(Get-Date).AddSeconds({duration}); $n=0; "
           f"while((Get-Date) -lt $e){{ curl.exe -s -m 10 -o NUL {iface}'{url}'; $n++ }}; "
           f'Write-Output "SENT=$n"')
-    out = send(host, port, ps, timeout=duration + 60)
+    out = dut.run(ps, timeout=duration + 60)
     m = re.search(r"SENT=(\d+)", out)
     return (m.group(1) if m else "?"), out
 
 
 def start_capture(args, out):
-    cmd = [args.dumpcap, "-i", args.iface, "-I", "-w", str(out), "-q"]
-    if args.freq:
-        cmd[4:4] = ["-k", str(args.freq)]
+    # macOS dumpcap can't set 802.11 channels (-k); and if you've set monitor mode
+    # yourself, --no-monitor drops -I too and just captures on the interface as-is.
+    cmd = [args.dumpcap, "-i", args.iface]
+    if not args.no_monitor:
+        cmd.append("-I")
+        if args.set_channel and args.freq:
+            cmd += ["-k", str(args.freq)]
+    cmd += ["-w", str(out), "-q"]
     return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
 
@@ -137,8 +150,8 @@ def main():
         epilog="examples:\n"
                "  # 1) test comms only (no capture, no sudo):\n"
                "  python3 collect_ncat.py --dut-host 10.0.0.61 --no-capture\n"
-               "  # 2) real run (sudo for dumpcap; Ethernet must be the Mac default route):\n"
-               "  sudo python3 collect_ncat.py --dut-host 10.0.0.61 --sessions 2 --duration 60\n"
+               "  # 2) real run — you've put the capture iface in monitor mode on the AP channel:\n"
+               "  sudo python3 collect_ncat.py --dut-host 10.0.0.61 --iface en0 --no-monitor --sessions 2 --duration 60\n"
                "\n(start the listener on the DUT first: run data\\real\\dut_listen.bat)",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dut-host", required=True, help="DUT ip the Mac can reach (control)")
@@ -157,6 +170,10 @@ def main():
     ap.add_argument("--wifi-mac", default=None, help="override DUT Wi-Fi MAC (frame filter)")
     ap.add_argument("--dumpcap", default="/Applications/Wireshark.app/Contents/MacOS/dumpcap")
     ap.add_argument("--no-capture", action="store_true", help="trigger only (validate comms)")
+    ap.add_argument("--no-monitor", action="store_true",
+                    help="don't set monitor mode — capture on --iface as-is (you set monitor + channel yourself)")
+    ap.add_argument("--set-channel", action="store_true",
+                    help="pass dumpcap -k to set the channel (NOT supported on macOS; default off)")
     ap.add_argument("--eval", action="store_true")
     ap.add_argument("--checkpoint", default=str(HERE / ".." / ".." / "train" / "checkpoints" / "best_resnet.pt.600epoch"))
     args = ap.parse_args()
@@ -168,42 +185,51 @@ def main():
             sys.exit(f"default route is {args.iface} (Wi-Fi); put Ethernet first or monitor mode drops you offline.")
 
     log(f"probing DUT ncat at {args.dut_host}:{args.dut_port} …")
-    wifi = detect_wifi(args.dut_host, args.dut_port)
-    wifi_ip = args.wifi_ip or wifi["ip"]
-    wifi_mac = (args.wifi_mac or wifi["mac"] or "").lower().replace("-", ":") or None
-    if not args.freq:
-        args.freq = wifi["freq"]
-    log(f"DUT Wi-Fi: iface={wifi['iface']} ip={wifi_ip} mac={wifi_mac} ch={wifi['channel']} freq={args.freq}")
-    if not (wifi_ip and wifi_mac and args.freq):
-        log("⚠ Wi-Fi not fully detected — is wlan associated, and is the ncat listener up?")
-        log("  raw DUT reply:\n" + (wifi["raw"][:400] or "(empty — Mac couldn't reach the DUT ncat)"))
-        if not args.no_capture:
-            sys.exit("  pass --wifi-ip / --wifi-mac / --freq to override, or fix the DUT, then retry.")
+    try:
+        dut = DUT(args.dut_host, args.dut_port)
+    except OSError as e:
+        sys.exit(f"could not reach DUT ncat at {args.dut_host}:{args.dut_port}: {e}\n"
+                 f"  -> run dut_listen.bat on the DUT and open port {args.dut_port} in its firewall.")
 
     services = list(csv.DictReader(open(args.services)))
     out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
     rows = []
-    for s in range(1, args.sessions + 1):
-        for svc in services:
-            label, name, url = svc["label"].strip(), svc["name"].strip(), svc["url"].strip()
-            out = out_dir / f"{label}__{name}__s{s}.pcapng"
-            log(f"{name} (label {label}) s{s} -> {out.name}")
-            proc = None if args.no_capture else start_capture(args, out)
-            time.sleep(args.guard)
-            t0 = time.time()
-            sent, _ = drive(args.dut_host, args.dut_port, url, wifi_ip, args.duration)
-            log(f"    traffic done in {time.time()-t0:.0f}s (sent={sent})")
-            time.sleep(args.drain)
-            cerr = stop_capture(proc)
+    try:
+        wifi = detect_wifi(dut)
+        wifi_ip = args.wifi_ip or wifi["ip"]
+        wifi_mac = (args.wifi_mac or wifi["mac"] or "").lower().replace("-", ":") or None
+        if not args.freq:
+            args.freq = wifi["freq"]
+        log(f"DUT Wi-Fi: iface={wifi['iface']} ip={wifi_ip} mac={wifi_mac} ch={wifi['channel']} freq={args.freq}")
+        if not (wifi_ip and wifi_mac):
+            log("⚠ Wi-Fi not fully detected — is wlan associated?")
+            log("  raw DUT reply:\n" + (wifi["raw"][:400] or "(empty)"))
             if not args.no_capture:
-                n = count_frames(args, out, wifi_mac)
-                if n is None and cerr:
-                    log(f"    ⚠ dumpcap: {cerr[:140]}")
-                else:
-                    flag = "  ⚠ LOW — wrong channel/MAC or traffic egressed Ethernet" if (n or 0) < 128 else ""
-                    log(f"    {n} data frames for {wifi_mac}{flag}")
-                rows.append({"pcap": f"sessions/{out.name}", "mac": wifi_mac, "label": label, "session": f"s{s}"})
-            time.sleep(args.idle)
+                sys.exit("  pass --wifi-ip / --wifi-mac to override, then retry.")
+
+        for s in range(1, args.sessions + 1):
+            for svc in services:
+                label, name, url = svc["label"].strip(), svc["name"].strip(), svc["url"].strip()
+                out = out_dir / f"{label}__{name}__s{s}.pcapng"
+                log(f"{name} (label {label}) s{s} -> {out.name}")
+                proc = None if args.no_capture else start_capture(args, out)
+                time.sleep(args.guard)
+                t0 = time.time()
+                sent, _ = drive(dut, url, wifi_ip, args.duration)
+                log(f"    traffic done in {time.time()-t0:.0f}s (sent={sent})")
+                time.sleep(args.drain)
+                cerr = stop_capture(proc)
+                if not args.no_capture:
+                    n = count_frames(args, out, wifi_mac)
+                    if n is None and cerr:
+                        log(f"    ⚠ dumpcap: {cerr[:140]}")
+                    else:
+                        flag = "  ⚠ LOW — wrong MAC, or the interface isn't on the AP channel" if (n or 0) < 128 else ""
+                        log(f"    {n} data frames for {wifi_mac}{flag}")
+                    rows.append({"pcap": f"sessions/{out.name}", "mac": wifi_mac, "label": label, "session": f"s{s}"})
+                time.sleep(args.idle)
+    finally:
+        dut.close()
 
     if rows:
         with open(args.manifest, "w", newline="") as f:
