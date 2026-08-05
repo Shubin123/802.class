@@ -8,3 +8,15 @@ data/output.parquet
 data/dataset_output_old/tmp_replay.npy
 data/dataset_output/dataset.parquet.zip
 infer/c157.pcapng
+
+# real-data collection — never commit captures or generated manifests
+data/real/sessions/
+data/real/manifest.csv
+data/real/report.json
+data/real/*.pcapng
+data/real/*.pcap
+data/real/__pycache__/
+
+# Field-pipeline captures, authorized manifests, derived datasets, and models
+data/field/
+models/

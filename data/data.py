@@ -450,7 +450,7 @@ def echo_server(stop: threading.Event) -> None:
     srv.settimeout(1.0)
     while not stop.is_set():
         try:
-            conn, _ = srv.accept()p
+            conn, _ = srv.accept()
             threading.Thread(target=_drain, args=(conn,), daemon=True).start()
         except socket.timeout:
             pass

@@ -1,0 +1,2 @@
+pcap,bssid,label,session_id,client_mac,device_id,ap_id,environment_id,collection_day,capture_radio,app_version
+sessions/example.pcapng,aa:bb:cc:dd:ee:ff,example_app,2026-08-05-example-01,11:22:33:44:55:66,phone-01,ap-home,home,2026-08-05,radio-01,1.0
