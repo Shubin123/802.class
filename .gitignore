@@ -16,3 +16,7 @@ data/real/report.json
 data/real/*.pcapng
 data/real/*.pcap
 data/real/__pycache__/
+
+# Field-pipeline captures, authorized manifests, derived datasets, and models
+data/field/
+models/
