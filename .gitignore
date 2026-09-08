@@ -3,7 +3,9 @@ data/dataset_output_old/captures/*.pcap
 data/flow_500/
 data/packet_5000/
 train/checkpoints/*.pt
-train/__pycache__/*
+# Python bytecode is generated locally and must not affect source status.
+__pycache__/
+*.py[cod]
 data/output.parquet
 data/dataset_output_old/tmp_replay.npy
 data/dataset_output/dataset.parquet.zip
