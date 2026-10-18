@@ -27,9 +27,11 @@ Run the automated installer from the repository root:
 
 The installer:
 1. Exports baseline model weights to `models/active_model.json` for high-speed Lua dissection.
-2. Symlinks `wifi_app_classifier.lua` into Wireshark's personal plugins directory (`~/.local/lib/wireshark/plugins/` and `~/.config/wireshark/plugins/`).
-3. Symlinks `wifi_app_capture` into Wireshark's extcap directory (`~/.local/lib/wireshark/extcap/`).
-4. Runs a verification pass using `tshark` on synthetic 802.11 captures.
+2. Symlinks `wifi_app_classifier.lua` into Wireshark's personal plugins directory (`~/Library/Application Support/Wireshark/plugins/`, `~/.local/lib/wireshark/plugins/`, and `~/.config/wireshark/plugins/`).
+3. Symlinks `wifi_app_capture` into Wireshark's extcap directory (`~/Library/Application Support/Wireshark/extcap/` and `~/.local/lib/wireshark/extcap/`).
+4. Installs the dedicated **`WiFi_App_Classifier` Configuration Profile** with custom columns (Direction, App Prediction, Confidence).
+5. Adds quick 1-click filter buttons (`[ WiFi App ] [ Uplink ] [ Downlink ] [ Protected ] [ High Conf ] [ Unknown ]`) directly to the Wireshark filter toolbar.
+6. Runs a verification pass using `tshark` on synthetic 802.11 captures.
 
 To verify installation at any time:
 

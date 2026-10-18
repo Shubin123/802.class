@@ -659,10 +659,20 @@ end
 
 -- Register GUI Menu Items
 if register_menu then
+    -- Tools Menu
     register_menu("Wi-Fi App Classifier/🎯 Classify Current Capture File", menu_classify_capture, MENU_TOOLS_UNSORTED)
     register_menu("Wi-Fi App Classifier/📡 Discover BSSIDs & Channels", menu_discover_bssids, MENU_TOOLS_UNSORTED)
     register_menu("Wi-Fi App Classifier/🔍 Audit Selected Packet & Session", menu_audit_packet, MENU_TOOLS_UNSORTED)
     register_menu("Wi-Fi App Classifier/⚡ Classifier Status & Benchmarks", menu_status_benchmarks, MENU_TOOLS_UNSORTED)
+
+    -- Analyze Menu
+    register_menu("Wi-Fi App Classifier/🎯 Classify Capture Windows", menu_classify_capture, MENU_ANALYZE_UNSORTED)
+    register_menu("Wi-Fi App Classifier/🔍 Audit Selected Packet", menu_audit_packet, MENU_ANALYZE_UNSORTED)
+
+    -- Context menu on right-click of packet
+    if MENU_PACKET_ANALYZE_UNSORTED then
+        register_menu("Wi-Fi App Classifier: Audit Packet & Session", menu_audit_packet, MENU_PACKET_ANALYZE_UNSORTED)
+    end
 end
 
 print("[WiFi-App] Raw 802.11 Application Classifier extension loaded successfully (postdissector & AI tools registered).")

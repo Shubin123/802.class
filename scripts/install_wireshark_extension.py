@@ -1,10 +1,21 @@
 #!/usr/bin/env python3
 """Install or uninstall the 802.11 Raw Application Classifier Wireshark Extension.
 
-Installs:
-  1. Lua Plugin (Postdissector & GUI Menu Tools) -> ~/.local/lib/wireshark/plugins/
-  2. Extcap Plugin (Capture Interface)          -> ~/.local/lib/wireshark/extcap/
-  3. Pre-exported model weights                 -> models/active_model.json
+Installs across all macOS / Linux Wireshark configuration locations:
+  1. Lua Plugin (Postdissector & GUI Menu Tools):
+       - ~/Library/Application Support/Wireshark/plugins/
+       - ~/.local/lib/wireshark/plugins/
+       - ~/.config/wireshark/plugins/
+  2. Extcap Capture Plugin:
+       - ~/Library/Application Support/Wireshark/extcap/
+       - ~/.local/lib/wireshark/extcap/
+  3. Preconfigured "WiFi_App_Classifier" Profile with custom columns:
+       - Direction (%Cus:wifi_app.direction)
+       - App Prediction (%Cus:wifi_app.prediction)
+       - Confidence (%Cus:wifi_app.confidence)
+  4. Quick 1-Click Filter Toolbar Buttons:
+       [ WiFi App ] [ Uplink ] [ Downlink ] [ Protected ] [ High Conf ] [ Unknown ]
+  5. Active model weights -> models/active_model.json
 """
 
 from __future__ import annotations
@@ -19,16 +30,57 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
 LUA_SRC = ROOT / "wireshark" / "wifi_app_classifier.lua"
 EXTCAP_SRC = ROOT / "wireshark" / "extcap" / "wifi_app_extcap.py"
 HELPER_SRC = ROOT / "wireshark" / "wifi_app_helper.py"
 
 HOME = Path.home()
+
 PLUGIN_DIRS = [
+    HOME / "Library" / "Application Support" / "Wireshark" / "plugins",
     HOME / ".local" / "lib" / "wireshark" / "plugins",
     HOME / ".config" / "wireshark" / "plugins",
 ]
-EXTCAP_DIR = HOME / ".local" / "lib" / "wireshark" / "extcap"
+
+EXTCAP_DIRS = [
+    HOME / "Library" / "Application Support" / "Wireshark" / "extcap",
+    HOME / ".local" / "lib" / "wireshark" / "extcap",
+]
+
+PROFILE_DIRS = [
+    HOME / "Library" / "Application Support" / "Wireshark" / "profiles" / "WiFi_App_Classifier",
+    HOME / ".config" / "wireshark" / "profiles" / "WiFi_App_Classifier",
+]
+
+DEFAULT_CONFIG_DIRS = [
+    HOME / "Library" / "Application Support" / "Wireshark",
+    HOME / ".config" / "wireshark",
+]
+
+DFILTER_BUTTONS_CONTENT = """\
+"WiFi App" "wifi_app" "Classified 802.11 monitor frames"
+"Uplink" "wifi_app.direction == \\"uplink\\"" "Client uplink to AP"
+"Downlink" "wifi_app.direction == \\"downlink\\"" "AP downlink to client"
+"Protected" "wifi_app.protected == true" "WPA2/WPA3 encrypted frames"
+"High Conf" "wifi_app.confidence >= 0.70" "High confidence predictions"
+"Unknown" "wifi_app.prediction == \\"unknown\\"" "Unknown application activity"
+"""
+
+PREFERENCES_CONTENT = """\
+# Wireshark preferences for WiFi_App_Classifier profile
+gui.column.format: 
+	"No.", "%m",
+	"Time", "%t",
+	"Source", "%s",
+	"Destination", "%d",
+	"Protocol", "%p",
+	"Direction", "%Cus:wifi_app.direction",
+	"App Prediction", "%Cus:wifi_app.prediction",
+	"Confidence", "%Cus:wifi_app.confidence",
+	"Length", "%L",
+	"Info", "%i"
+"""
 
 
 def install() -> None:
@@ -41,7 +93,7 @@ def install() -> None:
     weights = export_model_weights()
     print(f"✓ Model weights exported to: {weights}")
 
-    # 2. Link Lua Plugin
+    # 2. Link Lua Plugin across macOS & Linux plugin locations
     for pdir in PLUGIN_DIRS:
         pdir.mkdir(parents=True, exist_ok=True)
         target = pdir / "wifi_app_classifier.lua"
@@ -51,15 +103,35 @@ def install() -> None:
         print(f"✓ Linked Lua Plugin -> {target}")
 
     # 3. Link Extcap Interface
-    EXTCAP_DIR.mkdir(parents=True, exist_ok=True)
-    extcap_target = EXTCAP_DIR / "wifi_app_capture"
-    if extcap_target.is_symlink() or extcap_target.exists():
-        extcap_target.unlink()
-    extcap_target.symlink_to(EXTCAP_SRC)
-    extcap_target.chmod(0o755)
-    print(f"✓ Linked Extcap Tool -> {extcap_target}")
+    for edir in EXTCAP_DIRS:
+        edir.mkdir(parents=True, exist_ok=True)
+        extcap_target = edir / "wifi_app_capture"
+        if extcap_target.is_symlink() or extcap_target.exists():
+            extcap_target.unlink()
+        extcap_target.symlink_to(EXTCAP_SRC)
+        extcap_target.chmod(0o755)
+        print(f"✓ Linked Extcap Tool -> {extcap_target}")
 
-    # 4. Verify with tshark
+    # 4. Install dedicated Wireshark Profile with custom columns
+    for prof in PROFILE_DIRS:
+        prof.mkdir(parents=True, exist_ok=True)
+        (prof / "preferences").write_text(PREFERENCES_CONTENT, encoding="utf-8")
+        (prof / "dfilter_buttons").write_text(DFILTER_BUTTONS_CONTENT, encoding="utf-8")
+        print(f"✓ Installed 'WiFi_App_Classifier' Profile -> {prof}")
+
+    # 5. Add custom filter buttons to Default Profile
+    for cdir in DEFAULT_CONFIG_DIRS:
+        cdir.mkdir(parents=True, exist_ok=True)
+        btn_file = cdir / "dfilter_buttons"
+        existing = btn_file.read_text(encoding="utf-8") if btn_file.exists() else ""
+        if "wifi_app" not in existing:
+            with btn_file.open("a", encoding="utf-8") as f:
+                if existing and not existing.endswith("\n"):
+                    f.write("\n")
+                f.write(DFILTER_BUTTONS_CONTENT)
+            print(f"✓ Added filter buttons to default profile -> {btn_file}")
+
+    # 6. Verify with tshark
     tshark = shutil.which("tshark") or "/opt/homebrew/bin/tshark"
     if os.path.exists(tshark):
         print("\nVerifying extension in TShark / Wireshark...")
@@ -77,10 +149,13 @@ def install() -> None:
 
     print("\n" + "=" * 70)
     print("Wireshark Extension Installation Complete!")
-    print("Wireshark features active:")
-    print("  • Display filter: 'wifi_app', 'wifi_app.prediction', 'wifi_app.confidence'")
-    print("  • Tools menu: Tools -> Wi-Fi App Classifier -> [Capture / BSSID / Audit]")
-    print("  • Extcap Interface: '802.11 Application Classifier Live Capture'")
+    print("Available in Wireshark GUI:")
+    print("  • Welcome Screen Capture: '802.11 Application Classifier Live Capture'")
+    print("  • Menu Items: Tools -> Wi-Fi App Classifier -> [Capture / BSSID / Audit]")
+    print("  • Menu Items: Analyze -> Wi-Fi App Classifier")
+    print("  • Context Menu: Right-click any 802.11 packet -> 'Audit Packet & Session'")
+    print("  • Dedicated Profile: Bottom-right corner -> switch to 'WiFi_App_Classifier'")
+    print("  • Toolbar Filter Buttons: [ WiFi App ] [ Uplink ] [ Downlink ] [ Protected ]")
     print("=" * 70)
 
 
@@ -91,10 +166,15 @@ def uninstall() -> None:
         if target.is_symlink() or target.exists():
             target.unlink()
             print(f"✓ Removed {target}")
-    extcap_target = EXTCAP_DIR / "wifi_app_capture"
-    if extcap_target.is_symlink() or extcap_target.exists():
-        extcap_target.unlink()
-        print(f"✓ Removed {extcap_target}")
+    for edir in EXTCAP_DIRS:
+        extcap_target = edir / "wifi_app_capture"
+        if extcap_target.is_symlink() or extcap_target.exists():
+            extcap_target.unlink()
+            print(f"✓ Removed {extcap_target}")
+    for prof in PROFILE_DIRS:
+        if prof.exists():
+            shutil.rmtree(prof)
+            print(f"✓ Removed profile {prof}")
     print("Uninstall complete.")
 
 
@@ -104,8 +184,11 @@ def status() -> None:
         target = pdir / "wifi_app_classifier.lua"
         exists = target.exists() or target.is_symlink()
         print(f"  • Lua plugin at {target}: {'INSTALLED' if exists else 'NOT INSTALLED'}")
-    extcap_target = EXTCAP_DIR / "wifi_app_capture"
-    print(f"  • Extcap tool at {extcap_target}: {'INSTALLED' if extcap_target.exists() else 'NOT INSTALLED'}")
+    for edir in EXTCAP_DIRS:
+        extcap_target = edir / "wifi_app_capture"
+        print(f"  • Extcap tool at {extcap_target}: {'INSTALLED' if extcap_target.exists() else 'NOT INSTALLED'}")
+    for prof in PROFILE_DIRS:
+        print(f"  • Profile at {prof}: {'INSTALLED' if prof.exists() else 'NOT INSTALLED'}")
     weights = ROOT / "models" / "active_model.json"
     print(f"  • Model weights at {weights}: {'EXISTS' if weights.exists() else 'MISSING'}")
 
