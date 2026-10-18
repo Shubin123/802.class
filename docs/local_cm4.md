@@ -102,8 +102,19 @@ cd /storage/802.class
 
 All computation in those commands occurs on the CM4. A held-out inference
 result is saved as `data/field/cm4/independent-inference.json`. If available,
-`unshare -n .venv/bin/python scripts/verify_install.py` additionally demonstrates
-operation inside an isolated network namespace without disconnecting SSH.
+systemd can demonstrate operation inside an isolated network namespace while
+keeping the host Wi-Fi and SSH connection intact:
+
+```sh
+systemd-run --unit=wifi-classifier-offline-check --collect --wait --pipe \
+  -p PrivateNetwork=yes -p WorkingDirectory=/storage/802.class \
+  /storage/802.class/.venv/bin/python \
+  /storage/802.class/scripts/verify_install.py --require-isolated-network
+```
+
+The verifier rejects the isolated-network claim unless it observes a distinct
+Linux network namespace containing only the loopback interface. Its JSON report
+records `network_isolated` and `network_interfaces`.
 
 ## Handheld UI
 
@@ -117,7 +128,10 @@ cd /storage/802.class
 The framebuffer dashboard replaces RetroArch while open. It shows runtime
 validation, real dataset windows/sessions, WPA2/WPA3 evidence, and the latest
 classifier result. Controller button 0 starts the offline check, button 2 runs
-local capture inference, and button 1 exits. The on-screen A/X/B labels assume
+local sample inference, and button 1 exits. When a real model/capture is absent,
+the classify action uses the installed synthetic sample and model, explicitly
+labeled as a demo. The UI also shows the legacy replay dataset’s local packet
+and class counts after verification. The on-screen A/X/B labels assume
 the common button mapping; the underlying joystick indices are explicit here.
 Stopping the service also restores RetroArch:
 

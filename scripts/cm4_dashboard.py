@@ -27,11 +27,20 @@ def read_json(path):
 
 def status(root=ROOT):
     verification = read_json(root / 'data/field/install-check/verification.json')
+    legacy = read_json(root / 'data/dataset_output_old/dataset.local-report.json')
     evaluation = read_json(root / 'data/field/cm4/evaluation.json')
     inference = read_json(root / 'data/field/cm4/independent-inference.json')
+    demo = not inference
+    if demo:
+        inference = read_json(root / 'data/field/install-check/tcn.inference.json')
     sessions = inference.get('sessions', [])
     prediction = next((s.get('prediction') for s in sessions if s.get('prediction')), 'No result yet')
+    if demo and prediction != 'No result yet':
+        prediction = f'Synthetic demo: {prediction}'
     return {
+        'demo': demo,
+        'legacy_rows': legacy.get('rows'),
+        'legacy_classes': legacy.get('classes'),
         'runtime': verification.get('status', 'Not checked'),
         'host': verification.get('host', 'CM4 / Lakka'),
         'samples': evaluation.get('samples', 0),
@@ -39,7 +48,8 @@ def status(root=ROOT):
         'wpa2': evaluation.get('wpa2_status', 'Awaiting labeled captures'),
         'wpa3': evaluation.get('wpa3_status', 'Not tested: SAE test AP required'),
         'prediction': prediction,
-        'scope': evaluation.get('scope', 'Offline synthetic verification is not field accuracy.'),
+        'scope': ('Synthetic demo only; real activity model not available.' if demo
+                  else evaluation.get('scope', 'Real capture inference; field accuracy not established.')),
     }
 
 
@@ -65,8 +75,11 @@ def render(info, message='Ready', busy=False):
         d.text((32, y), label, font=small, fill='#8e9eb9')
         d.text((228, y - 3), value[:61], font=font, fill='#eef3ff')
     d.text((32, 427), str(info['scope'])[:92], font=small, fill='#aebcd3')
+    if info.get('legacy_rows') is not None:
+        d.text((32, 451), f"Local replay dataset: {info['legacy_rows']:,} packets / {info['legacy_classes']} classes",
+               font=small, fill='#8e9eb9')
     d.rounded_rectangle((28, 475, 932, 520), radius=10, fill='#1d2a41')
-    d.text((44, 487), 'A: Offline check     X: Classify capture     B: Return to Lakka', font=small, fill='#d5e3ff')
+    d.text((44, 487), 'A: Offline check     X: Classify sample     B: Return to Lakka', font=small, fill='#d5e3ff')
     return image
 
 
@@ -113,18 +126,30 @@ class Framebuffer:
         os.close(self.fd)
 
 
-def inference_command():
-    manifest = ROOT / 'data/field/cm4/manifest.csv'
-    if not manifest.exists():
-        raise RuntimeError('No real capture manifest installed')
-    rows = list(csv.DictReader(manifest.open()))
+def inference_command(root=ROOT):
+    """Prefer a real model; otherwise offer the explicitly labeled offline demo."""
+    manifest = root / 'data/field/cm4/manifest.csv'
+    model = root / 'models/cm4_tcn.pt'
+    output = root / 'data/field/cm4/independent-inference.json'
+    if not (manifest.exists() and model.exists()):
+        manifest = root / 'data/field/install-check/manifest.csv'
+        model = manifest.parent / 'tcn.pt'
+        output = manifest.parent / 'tcn.inference.json'
+    if not manifest.exists() or not model.exists():
+        raise RuntimeError('Run the offline check first; no local sample/model available')
+    with manifest.open(newline='') as f:
+        rows = list(csv.DictReader(f))
+    if not rows:
+        raise RuntimeError('Capture manifest has no sessions')
     row = rows[-1]
-    model = ROOT / 'models/cm4_tcn.pt'
-    if not model.exists():
-        raise RuntimeError('No trained CM4 TCN installed')
-    return [sys.executable, '-m', 'infer.field_inference', '--pcap', str(manifest.parent / row['pcap']),
+    if not all(row.get(key) for key in ('pcap', 'bssid', 'client_mac')):
+        raise RuntimeError('Capture manifest requires pcap, bssid, and client_mac')
+    pcap = manifest.parent / row['pcap']
+    if not pcap.is_file():
+        raise RuntimeError('Manifest capture is missing from local storage')
+    return [sys.executable, '-m', 'infer.field_inference', '--pcap', str(pcap),
             '--bssid', row['bssid'], '--client-mac', row['client_mac'], '--checkpoint', str(model),
-            '--device', 'cpu', '--out', str(ROOT / 'data/field/cm4/independent-inference.json')]
+            '--device', 'cpu', '--out', str(output)]
 
 
 def main():
@@ -177,7 +202,7 @@ def main():
                     logfile = (ROOT / 'data/field/dashboard.log').open('a')
                     child = subprocess.Popen(command, cwd=ROOT, stdout=logfile, stderr=subprocess.STDOUT,
                                              env={**os.environ, 'OMP_NUM_THREADS': '2'})
-                    message = 'Checking runtime' if action == 'check' else 'Classifying capture'
+                    message = 'Checking runtime' if action == 'check' else 'Classifying local sample'
                 except (OSError, RuntimeError) as exc:
                     message = str(exc)
     finally:

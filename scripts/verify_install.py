@@ -10,6 +10,8 @@ import argparse
 import csv
 import json
 import platform
+import os
+import socket
 import sys
 import time
 from pathlib import Path
@@ -18,11 +20,36 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 
+def network_context():
+    interfaces = [name for _, name in socket.if_nameindex()]
+    try:
+        isolated = os.readlink('/proc/self/ns/net') != os.readlink('/proc/1/ns/net')
+    except OSError:
+        isolated = False
+    isolated = isolated and set(interfaces) == {'lo'}
+    return isolated, interfaces
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', type=Path, default=ROOT / 'data/field/install-check')
+    parser.add_argument('--require-isolated-network', action='store_true',
+                        help='Require a Linux network namespace with only loopback')
     args = parser.parse_args()
+    isolated, interfaces = network_context()
+    if args.require_isolated_network and not isolated:
+        parser.error('this check requires an isolated Linux network namespace with only loopback')
     args.out.mkdir(parents=True, exist_ok=True)
+    legacy_path = ROOT / 'data/dataset_output_old/dataset.parquet'
+    if legacy_path.exists():
+        import pandas as pd
+        import pyarrow.parquet as pq
+        legacy = {
+            'rows': pq.ParquetFile(legacy_path).metadata.num_rows,
+            'classes': int(pd.read_parquet(legacy_path, columns=['label'])['label'].nunique()),
+            'provenance': 'legacy replay dataset; not field accuracy evidence',
+        }
+        legacy_path.with_suffix('.local-report.json').write_text(json.dumps(legacy, indent=2))
     import numpy as np
     import torch
     from scapy.all import Dot11, Dot11QoS, RadioTap, Raw, wrpcap
@@ -83,7 +110,7 @@ def main():
         models[kind] = {'status': 'passed', 'windows': len(inference['windows']), 'validation': report['validation']}
     result = dict(status='passed', scope='offline installation smoke test; synthetic data, not field accuracy',
         host=platform.node(), machine=platform.machine(), python=platform.python_version(),
-        torch=torch.__version__, device='cpu', samples=built['samples'], source_sessions=built['source_sessions'],
+        torch=torch.__version__, device='cpu', network_isolated=isolated, network_interfaces=interfaces, samples=built['samples'], source_sessions=built['source_sessions'],
         models=models, elapsed_seconds=round(time.monotonic() - started, 2), timestamp=time.time())
     (args.out / 'verification.json').write_text(json.dumps(result, indent=2))
     print(json.dumps(result, indent=2))
