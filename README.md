@@ -109,3 +109,20 @@ The suite covers BSSID address semantics, QoS data, retry scope, per-client
 sessioning, schema/padding, grouped splitting, PCAP-to-inference round trips,
 and a grouped training/ONNX-export smoke path. It does not claim real-world
 accuracy; that remains blocked on authorized, labeled monitor-mode data.
+
+## Wireshark Extension
+
+The classifier integrates directly with Wireshark and TShark via a native Lua postdissector, GUI tools menu, and Extcap capture interface.
+
+```sh
+.venv/bin/python scripts/install_wireshark_extension.py
+```
+
+This registers:
+- **Display filters**: `wifi_app`, `wifi_app.prediction`, `wifi_app.direction`, `wifi_app.confidence`, `wifi_app.protected`, `wifi_app.client`, `wifi_app.bssid`.
+- **Packet details**: Automatic 802.11 Data frame decoration with real-time sliding window predictions.
+- **GUI Tools**: `Tools -> Wi-Fi App Classifier` for batch PCAP classification, beacon BSSID discovery, selected packet audits, and engine status.
+- **Extcap Live Capture**: `802.11 Application Classifier Live Capture` interface in Wireshark.
+
+See [Wireshark extension documentation](docs/wireshark_extension.md) for full details.
+
