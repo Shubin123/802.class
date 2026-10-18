@@ -314,9 +314,85 @@ def format_capture_report(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def cmd_test_capture(count: int = 20) -> dict[str, Any]:
+    """Test live extcap streaming, Wireshark FIFO ingestion, and real-time classification."""
+    import tempfile
+    extcap = ROOT / "wireshark" / "extcap" / "wifi_app_extcap.py"
+    lua_script = ROOT / "wireshark" / "wifi_app_classifier.lua"
+    tshark = shutil.which("tshark") or "/opt/homebrew/bin/tshark"
+    if not os.path.exists(tshark):
+        raise FileNotFoundError(f"tshark not found: {tshark}")
+
+    fifo_dir = Path(tempfile.mkdtemp(prefix="wifi_app_test_"))
+    fifo_path = fifo_dir / "capture.fifo"
+    os.mkfifo(fifo_path)
+
+    try:
+        tshark_cmd = [
+            tshark,
+            "-X", f"lua_script:{lua_script}",
+            "-i", str(fifo_path),
+            "-c", str(count),
+            "-T", "fields",
+            "-e", "frame.number",
+            "-e", "wlan.fc.type",
+            "-e", "wlan.sa",
+            "-e", "wifi_app.direction",
+            "-e", "wifi_app.prediction",
+            "-e", "wifi_app.confidence",
+        ]
+        tshark_proc = subprocess.Popen(tshark_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        time.sleep(0.3)
+
+        extcap_cmd = [
+            sys.executable,
+            str(extcap),
+            "--extcap-interface", "wifi_app_demo",
+            "--capture",
+            "--fifo", str(fifo_path),
+            "--pace", "1.0",
+        ]
+        extcap_proc = subprocess.Popen(extcap_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        stdout, stderr = tshark_proc.communicate(timeout=10)
+        if extcap_proc.poll() is None:
+            extcap_proc.terminate()
+
+        lines = [l.strip() for l in stdout.splitlines() if l.strip() and not l.startswith("[")]
+        data_frames = 0
+        classified = 0
+        sample_predictions = []
+        for l in lines:
+            parts = l.split("\t")
+            if len(parts) >= 2 and parts[1] == "2":
+                data_frames += 1
+                if len(parts) >= 5 and parts[4]:
+                    classified += 1
+                    sample_predictions.append({
+                        "frame": parts[0],
+                        "pred": parts[4],
+                        "conf": parts[5] if len(parts) > 5 else "0"
+                    })
+
+        result = {
+            "status": "passed" if len(lines) >= count else "partial",
+            "packets_captured": len(lines),
+            "data_frames": data_frames,
+            "classified_frames": classified,
+            "sample_predictions": sample_predictions[:5],
+        }
+        return result
+    finally:
+        if fifo_path.exists():
+            os.remove(fifo_path)
+        if fifo_dir.exists():
+            shutil.rmtree(fifo_dir, ignore_errors=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--status", action="store_true", help="Print environment and model status")
+    parser.add_argument("--test-capture", action="store_true", help="Test live extcap FIFO capture and classification")
     parser.add_argument("--discover-bssids", metavar="PCAP", help="Discover BSSIDs in a capture file")
     parser.add_argument("--classify-capture", metavar="PCAP", help="Classify all client windows in capture")
     parser.add_argument("--bssid", help="Target AP BSSID MAC")
@@ -331,6 +407,11 @@ def main() -> None:
     if args.status:
         data = cmd_status()
         print(json.dumps(data, indent=2))
+        return
+
+    if args.test_capture:
+        result = cmd_test_capture()
+        print(json.dumps(result, indent=2))
         return
 
     if args.export_model_weights:

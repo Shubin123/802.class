@@ -148,3 +148,13 @@ def test_dfilter_buttons_uat_format():
         parts = line.split('","')
         assert len(parts) == 4, f"Expected 4 UAT fields, got {len(parts)} in line: {line}"
 
+
+@pytest.mark.skipif(not shutil.which("tshark"), reason="TShark not available in environment")
+def test_extcap_fifo_streaming():
+    helper = ROOT / "wireshark" / "wifi_app_helper.py"
+    r = subprocess.run([sys.executable, str(helper), "--test-capture"], capture_output=True, text=True, check=True)
+    data = json.loads(r.stdout)
+    assert data["status"] == "passed"
+    assert data["packets_captured"] >= 10
+    assert data["data_frames"] >= 1
+

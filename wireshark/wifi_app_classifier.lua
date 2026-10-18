@@ -554,6 +554,8 @@ local function menu_classify_capture()
     else
         -- Search standard directories for recent capture
         local candidates = {
+            ROOT .. "/data/field/cm4/cm4-wpa2-d85af33381ea-000.pcapng",
+            ROOT .. "/data/field/diagnostics/disassociated.pcapng",
             ROOT .. "/data/field/cm4/capture.pcapng",
             ROOT .. "/data/field/install-check/synthetic-16-fixture_small-0.pcap",
             ROOT .. "/data/real/sessions/session_001.pcapng",
