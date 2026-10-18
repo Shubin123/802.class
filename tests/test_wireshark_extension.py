@@ -136,3 +136,15 @@ def test_install_script_status():
     r = subprocess.run([sys.executable, str(installer), "--status"], capture_output=True, text=True, check=True)
     assert "Wireshark Extension Status:" in r.stdout
     assert "INSTALLED" in r.stdout
+
+
+def test_dfilter_buttons_uat_format():
+    btn_file = Path.home() / "Library" / "Application Support" / "Wireshark" / "profiles" / "WiFi_App_Classifier" / "dfilter_buttons"
+    assert btn_file.exists()
+    lines = [line.strip() for line in btn_file.read_text(encoding="utf-8").splitlines() if line.strip() and not line.startswith("#")]
+    assert len(lines) >= 1
+    for line in lines:
+        assert line.startswith('"TRUE",') or line.startswith('"FALSE",'), f"Invalid UAT enabled boolean: {line}"
+        parts = line.split('","')
+        assert len(parts) == 4, f"Expected 4 UAT fields, got {len(parts)} in line: {line}"
+
