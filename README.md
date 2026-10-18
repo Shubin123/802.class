@@ -1,8 +1,14 @@
 # Raw 802.11 application classifier
 
-This repository is moving from a TLS/replay experiment to a capture-native
-pipeline that classifies **BSSID-scoped client observation windows** from raw
-802.11 monitor-mode traffic. It does not decrypt Wi-Fi or TLS traffic.
+[![GitHub Pages](https://img.shields.io/badge/Documentation%20%26%20Demo-GitHub%20Pages-38bdf8?style=flat&logo=github)](https://shubin123.github.io/802.class/)
+[![Wireshark Extension](https://img.shields.io/badge/Wireshark-Extension%20Suite-16a34a?style=flat&logo=wireshark)](docs/wireshark_extension.md)
+[![Cipher Compatibility](https://img.shields.io/badge/WPA2%20%2F%20WPA3-Zero--Decryption-818cf8?style=flat)](https://shubin123.github.io/802.class/)
+
+> **Live Documentation & Interactive Simulator**: Explore the architecture, CM4 topology, Wireshark integration, and interactive sliding-window classifier at [**shubin123.github.io/802.class**](https://shubin123.github.io/802.class/).
+
+This repository classifies **BSSID-scoped client observation windows** from raw
+802.11 monitor-mode traffic. It operates entirely on Layer 2 MAC metadata and
+does not decrypt Wi-Fi (WPA2/WPA3) or TLS traffic.
 
 The product statement is deliberately narrow: given an AP radio MAC/BSSID and
 a channel-locked monitor capture, report whether each client window is
