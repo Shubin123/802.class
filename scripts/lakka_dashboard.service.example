@@ -1,0 +1,6 @@
+# Generated paths and the RetroArch playlist are installed by install_lakka_ui.py.
+# The dashboard runs on /dev/fb0; it does not start a web server.
+# Launch: systemctl start wifi-classifier.service
+# Return: physical B button, or systemctl stop wifi-classifier.service
+# Returning/stopping starts retroarch.service again.
+# Installing does not change the default boot target or enable the dashboard at boot.

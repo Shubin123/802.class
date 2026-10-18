@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "raw-wifi-app-classifier"
+version = "0.1.0"
+description = "BSSID-scoped application observation from raw protected 802.11 metadata"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=2,<3", "pandas>=2,<4", "pyarrow>=18", "scikit-learn>=1.6,<2",
+  "joblib>=1.4", "torch>=2.6", "scapy>=2.6",
+]
+
+[project.optional-dependencies]
+display = ["pillow>=11"]
+dev = ["pytest>=8", "onnx>=1.17", "onnxscript>=0.3"]
+
+[project.scripts]
+wifi-field-infer = "infer.field_inference:main"
+wifi-field-train = "train.train_field:main"
+
+[tool.setuptools]
+packages = ["wifi_app", "infer", "train"]

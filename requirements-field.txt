@@ -1,0 +1,11 @@
+# Portable CPU/Apple Silicon dependencies for the capture-native pipeline.
+numpy>=2,<3
+pandas>=2,<4
+pyarrow>=18
+scikit-learn>=1.6,<2
+joblib>=1.4
+torch>=2.6
+scapy>=2.6
+pytest>=8
+onnx>=1.17
+onnxscript>=0.3

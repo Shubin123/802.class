@@ -32,6 +32,7 @@ def _write_manifest(path: Path) -> None:
                 "session_id": f"{label}-session-{ordinal}",
                 "client_mac": CLIENT_A if ordinal == 0 else CLIENT_B,
                 "device_id": f"device-{ordinal}",
+                "security": "wpa2" if ordinal == 0 else "wpa3",
             })
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=rows[0].keys())
@@ -61,6 +62,8 @@ def test_manifest_dataset_and_grouped_split(tmp_path: Path) -> None:
     out = tmp_path / "dataset.parquet"
     report = build_field_dataset(manifest, out, window_size=4, stride=4, min_frames=4, parser=parser)
     assert report["samples"] == 8
+    import pandas as pd
+    assert set(pd.read_parquet(out)["security"]) == {"wpa2", "wpa3"}
     arrays = load_field_dataset(out)
     assert arrays.x.shape == (8, len(FEATURE_COLUMNS), 4)
     train_idx, val_idx = grouped_split_indices(arrays, folds=2)
@@ -102,7 +105,7 @@ def test_grouped_training_and_onnx_export_smoke(tmp_path: Path) -> None:
     assert exported.exists() and exported.stat().st_size > 0
 
 
-def _write_monitor_pcap(path: Path) -> None:
+def _write_monitor_pcap(path: Path, *, mic_bytes: int = 8) -> None:
     scapy = pytest.importorskip("scapy.all")
     RadioTap, Dot11, Dot11QoS, Raw, wrpcap = (
         scapy.RadioTap,
@@ -118,7 +121,7 @@ def _write_monitor_pcap(path: Path) -> None:
             dot11 = Dot11(type=2, subtype=8, FCfield=0x41, addr1=BSSID, addr2=client, addr3="02:00:00:00:00:aa", SC=(index + 1) << 4)
         else:
             dot11 = Dot11(type=2, subtype=8, FCfield=0x42, addr1=client, addr2=BSSID, addr3="02:00:00:00:00:aa", SC=(index + 1) << 4)
-        packet = RadioTap() / dot11 / Dot11QoS(TID=3) / Raw(b"x" * (40 + index))
+        packet = RadioTap() / dot11 / Dot11QoS(TID=3) / Raw(bytes([index + 1, 0, 0, 0x20, 0, 0, 0, 0]) + bytes([0xa5 ^ index]) * (40 + index) + bytes(mic_bytes))
         packet.time = 1.0 + index * 0.1
         packets.append(packet)
     # A valid-looking frame for another BSSID proves the parser does not use
@@ -129,9 +132,10 @@ def _write_monitor_pcap(path: Path) -> None:
     wrpcap(str(path), packets)
 
 
-def test_pcap_to_bssid_scoped_model_inference_round_trip(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mic_bytes", [8, 16], ids=["ccmp-128-envelope", "gcmp-128-envelope"])
+def test_pcap_to_bssid_scoped_model_inference_round_trip(tmp_path: Path, mic_bytes: int) -> None:
     pcap = tmp_path / "capture.pcapng"
-    _write_monitor_pcap(pcap)
+    _write_monitor_pcap(pcap, mic_bytes=mic_bytes)
     from infer.field_inference import infer_capture
 
     config = TCNConfig(in_channels=len(FEATURE_COLUMNS), num_classes=2, width=8, blocks=1, dropout=0.0)
@@ -153,3 +157,18 @@ def test_pcap_to_bssid_scoped_model_inference_round_trip(tmp_path: Path) -> None
     assert {item["client_mac"] for item in result["sessions"]} == {CLIENT_A, CLIENT_B}
     assert result["capture_quality"]["scope_counts"]["different_bssid"] == 1
     assert all(item["prediction"] in {"app_a", "app_b"} for item in result["windows"])
+
+
+def test_short_existing_client_session_reports_insufficient_data(tmp_path: Path):
+    from infer.field_inference import infer_capture
+    pcap = tmp_path / 'short.pcap'
+    _write_monitor_pcap(pcap)
+    # Each client has only four frames. No model needs to load or run.
+    bundle = {
+        'kind': 'field-tcn-v1', 'window_size': 16,
+        'preprocessing': {'min_frames': 8},
+    }
+    result = infer_capture(pcap, BSSID, bundle, device='cpu')
+    assert result['status'] == 'insufficient_data'
+    assert len(result['sessions']) == 2
+    assert all(item['status'] == 'insufficient_data' for item in result['sessions'])

@@ -128,6 +128,7 @@ def infer_capture(
     for index, window in enumerate(windows):
         by_session[window.session_id].append(index)
     if not windows:
+        result["status"] = "insufficient_data"
         for session in sessions:
             result["sessions"].append({
                 "session_id": session.session_id,

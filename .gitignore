@@ -22,3 +22,10 @@ data/real/__pycache__/
 # Field-pipeline captures, authorized manifests, derived datasets, and models
 data/field/
 models/
+
+.venv/
+data/dataset_output_old/dataset.parquet
+data/dataset_output_old/*.local-report.json
+.tools/
+*.egg-info/
+.pytest_cache/

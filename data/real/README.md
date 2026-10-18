@@ -70,3 +70,61 @@ chance baseline (needs torch/scapy — run it wherever those are installed, or h
 - A capture with **0–few data frames** → wrong channel/MAC, or curl egressed Ethernet
   instead of Wi-Fi (pass `--wifi-ip <addr>`).
 - Many of the 120 classes share CDNs → a size/timing fingerprint has a collision ceiling.
+
+## Linux / CM4 DUT over SSH (capture-native pipeline)
+
+Use `collect_ssh.py` for Linux DUTs. The Mac remains the passive sniffer and the
+CM4 remains a managed Wi-Fi client. Set up the portable local environment:
+
+```sh
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -r requirements-field.txt
+```
+
+The bundled legacy dataset can be extracted with
+`unzip -n data/dataset_output_old/dataset.parquet.zip -d data/dataset_output_old`.
+It is replay data without the field pipeline's session/BSSID grouping; do not
+use it as evidence of WPA2/WPA3 field accuracy.
+
+The Mac account needs BPF access (Wireshark ChmodBPF), a monitor-capable radio,
+and the DUT's channel. Check `dumpcap -i en0 -I -L` first. Then run one labeled
+activity at a time, collecting independent sessions for each class:
+
+```sh
+.venv/bin/python data/real/collect_ssh.py \
+  --dut-host root@192.168.1.96 --interface en0 \
+  --security wpa2 --label example_fetch --url https://example.com \
+  --sessions 3 --duration 30
+```
+
+The collector records AP RSN evidence and rejects mismatched security modes.
+For WPA3 use an SAE-only test AP and `--security wpa3`. A transition-mode beacon
+does not establish which authentication the DUT negotiated. No passwords are
+read or stored. Collection does not reconfigure the AP or DUT network.
+
+SSH schedules detached, interface-bound curl traffic, then closes before the
+Mac capture starts. SSH reconnects after capture to verify curl success. This
+keeps control traffic outside the captured interval even when control uses
+Wi-Fi. Capture channel support must still be verified from the resulting PCAP.
+Only captures with successful traffic, no curl failures, and at least 16
+protected DUT frames enter the manifest. Quality sidecars retain failed runs.
+URL-fetch labels describe scripted activity, not native application behavior.
+
+After collecting at least two activities with multiple sessions in both modes:
+
+```sh
+.venv/bin/python data/build_field_dataset.py \
+  --manifest data/field/cm4/manifest.csv --out data/field/cm4/dataset.parquet
+.venv/bin/python train/train_field.py --data data/field/cm4/dataset.parquet \
+  --model baseline --folds 3 --out models/cm4_baseline.joblib
+```
+
+`security` is retained as dataset metadata, not a classifier feature. Evaluate
+held-out sessions separately for WPA2 and WPA3 before claiming support or
+accuracy. The synthetic CCMP/GCMP envelope tests check protected-frame parsing
+and inference plumbing only; they do not perform authentication, cryptographic
+verification, or live radio validation.
+
+For the tested Mac, use the channel preparation and mandatory James Wi-Fi /
+internet recovery commands in [local CM4 setup](../../docs/local_cm4.md).
+The same guide covers the standalone CM4 runtime and handheld UI.

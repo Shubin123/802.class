@@ -35,6 +35,14 @@ The new code is independent from the old simulator/checkpoints:
 The existing `data/data.py`, `train/train.py`, and `infer/inference.py` are
 legacy replay/TLS-baseline work. They are not used by the field pipeline.
 
+## Local installation and CM4
+
+See [local Mac + CM4 setup](docs/local_cm4.md) for portable installation, SSH DUT
+collection, automatic return to the saved James Wi-Fi network, independent CM4
+validation, and the handheld framebuffer UI. Use `pyproject.toml` or
+`requirements-field.txt` for the field pipeline; the CUDA-pinned
+`requirements.txt` belongs to the legacy experiment.
+
 ## Workflow
 
 1. Confirm that the supplied address is the AP's **BSSID/radio MAC**, discover
@@ -89,6 +97,9 @@ insufficient grouped examples per class, cross-group validation leakage, schema
 mismatches, or no usable client windows.
 
 ## Validation
+
+See the [hardware validation record](docs/validation.md) for observed results
+and the remaining live WPA3 / physical UI checks.
 
 ```powershell
 python -m pytest -q

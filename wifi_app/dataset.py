@@ -33,6 +33,7 @@ OPTIONAL_GROUP_COLUMNS = (
     "collection_day",
     "capture_radio",
     "app_version",
+    "security",
 )
 
 
